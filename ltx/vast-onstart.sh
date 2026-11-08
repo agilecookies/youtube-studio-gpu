@@ -64,6 +64,15 @@ python3 - <<'PYEOF'
 import os, sys, threading, time
 from pathlib import Path
 
+# Disable XET for bulk download — same reason as FLUX: XET cold-start is slow.
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+try:
+    import hf_transfer  # noqa: F401
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    print("[STEP 3/4] fast backend: hf_transfer", flush=True)
+except ImportError:
+    print("[STEP 3/4] fast backend: standard", flush=True)
+
 local_dir = os.environ["LTX_MODEL_DIR"]
 token     = os.environ["HF_TOKEN"]
 HF_REPO   = "Lightricks/LTX-2.5"
@@ -140,7 +149,8 @@ class _Monitor(threading.Thread):
     daemon = True
     INTERVAL   = 30     # seconds between samples
     SLOW_MBS   = 20.0   # MB/s threshold
-    SLOW_LIMIT = 120    # seconds below threshold before fail
+    GRACE      = 300    # seconds before slow-host check activates
+    SLOW_LIMIT = 300    # seconds below threshold after grace before fail
 
     def __init__(self, local, expected_gb):
         super().__init__()
@@ -149,18 +159,22 @@ class _Monitor(threading.Thread):
         self._stop       = threading.Event()
         self._prev       = 0
         self._slow_since = None
+        self._start_time = time.time()
 
     def run(self):
         while not self._stop.wait(self.INTERVAL):
-            cur   = _dir_bytes(self.local)
-            speed = (cur - self._prev) / (self.INTERVAL * 1e6)
-            fname = _newest_file(self.local)
+            cur     = _dir_bytes(self.local)
+            speed   = (cur - self._prev) / (self.INTERVAL * 1e6)
+            elapsed = time.time() - self._start_time
+            fname   = _newest_file(self.local)
             print(
                 f"[STEP 3/4] {cur/1e9:.2f} GB / {self.expected_gb:.2f} GB"
                 f"  {speed:.1f} MB/s  current: {fname}",
                 flush=True,
             )
             self._prev = cur
+            if elapsed < self.GRACE:
+                continue
             if speed < self.SLOW_MBS:
                 if self._slow_since is None:
                     self._slow_since = time.time()
