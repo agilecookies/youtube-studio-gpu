@@ -62,6 +62,4 @@ fi
 
 cd "${REPO_DIR}/flux"
 echo "[STEP 4/4] Starting FLUX service on port ${PORT}..."
-nohup python3 app.py >> "${LOG_FILE}" 2>&1 &
-echo $! > /workspace/.flux-service.pid
-echo "[STEP 4/4] FLUX service started (PID $(cat /workspace/.flux-service.pid)). Logs: ${LOG_FILE}"
+exec python3 app.py

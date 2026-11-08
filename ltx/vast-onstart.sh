@@ -89,6 +89,4 @@ echo "[STEP 3/4] Model weights ready."
 
 cd "${REPO_DIR}/ltx"
 echo "[STEP 4/4] Starting LTX service on port ${PORT}..."
-nohup python3 app.py >> "${LOG_FILE}" 2>&1 &
-echo $! > /workspace/.ltx-service.pid
-echo "[STEP 4/4] LTX service started (PID $(cat /workspace/.ltx-service.pid)). Logs: ${LOG_FILE}"
+exec python3 app.py
