@@ -13,6 +13,16 @@ PORT="${PORT:-8080}"
 REQS_HASH_FILE="/workspace/.ltx-reqs-hash"
 
 export HF_HOME
+
+# ── HF_TOKEN diagnostic + alias ───────────────────────────────────────────────
+if [ -n "${HF_TOKEN:-}" ]; then
+  echo "[BOOT] HF_TOKEN present: yes (length ${#HF_TOKEN})"
+  export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+else
+  echo "[BOOT] HF_TOKEN present: no — LTX-2.5 is gated; model downloads will fail"
+  exit 1
+fi
+
 mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 mkdir -p "${MODEL_DIR}/diffusion_models" "${MODEL_DIR}/text_encoders" "${MODEL_DIR}/vae"
 mkdir -p "${MODEL_DIR}/model_patches" "${MODEL_DIR}/latent_upscale_models"

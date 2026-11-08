@@ -12,6 +12,14 @@ REQS_HASH_FILE="/workspace/.flux-reqs-hash"
 
 export HF_HOME
 
+# ── HF_TOKEN diagnostic + alias ───────────────────────────────────────────────
+if [ -n "${HF_TOKEN:-}" ]; then
+  echo "[BOOT] HF_TOKEN present: yes (length ${#HF_TOKEN})"
+  export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+else
+  echo "[BOOT] HF_TOKEN present: no"
+fi
+
 echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
 
 # ── Install dependencies (skip if unchanged) ──────────────────────────────────
