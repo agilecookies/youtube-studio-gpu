@@ -71,6 +71,16 @@ METRICS_FILE    = Path(os.environ.get("METRICS_FILE", "/workspace/flux-generatio
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Globally authenticate with HF Hub so from_pretrained and any internal
+# huggingface_hub calls don't warn about unauthenticated requests.
+_hf_token = os.environ.get("HF_TOKEN")
+if _hf_token:
+    from huggingface_hub import login as _hf_login
+    _hf_login(token=_hf_token, add_to_git_credential=False)
+    logger.info("HF Hub authenticated (token length %d)", len(_hf_token))
+else:
+    logger.warning("HF_TOKEN not set — HF Hub requests will be unauthenticated")
+
 # Reference role ordering for deterministic image= argument construction.
 # Characters first → location → props, consistent with sceneAnchorPipeline.ts ref ordering.
 _ROLE_ORDER: dict[str, int] = {"character": 0, "location": 1, "prop": 2}
@@ -154,11 +164,13 @@ def _load_models() -> None:
         # specific class is not yet exported.
         model_path = FLUX_MODEL_DIR if os.path.isdir(FLUX_MODEL_DIR) else FLUX_MODEL_ID
         logger.info("Loading from: %s", model_path)
+        _token = os.environ.get("HF_TOKEN")
         try:
             from diffusers import Flux2KleinPipeline
             pipe = Flux2KleinPipeline.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+                token=_token,
             )
             logger.info("Using Flux2KleinPipeline (native class import)")
         except (ImportError, AttributeError):
@@ -166,6 +178,7 @@ def _load_models() -> None:
             pipe = DiffusionPipeline.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+                token=_token,
             )
             logger.info("Flux2KleinPipeline not in this diffusers build; using DiffusionPipeline auto-detection")
 

@@ -45,12 +45,14 @@ fi
 if [ ! -d "${FLUX_MODEL_DIR}" ] || [ -z "$(ls -A "${FLUX_MODEL_DIR}" 2>/dev/null)" ]; then
   echo "[STEP 3/4] Downloading FLUX.2-klein-4B weights to ${FLUX_MODEL_DIR}..."
   python3 - <<'PYEOF'
-import os, sys
-from huggingface_hub import snapshot_download
+import os
+from huggingface_hub import snapshot_download, login
+token = os.environ["HF_TOKEN"]
+login(token=token, add_to_git_credential=False)
 snapshot_download(
     "black-forest-labs/FLUX.2-klein-4B",
     local_dir=os.environ["FLUX_MODEL_DIR"],
-    token=os.environ.get("HF_TOKEN"),
+    token=token,
     ignore_patterns=["*.md", "*.txt", "*.bin"],
 )
 print("[STEP 3/4] Model weights downloaded.")
