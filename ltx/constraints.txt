@@ -1,0 +1,5 @@
+# Constraints for pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime base image.
+# These packages are pre-installed; do not reinstall or upgrade them.
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1

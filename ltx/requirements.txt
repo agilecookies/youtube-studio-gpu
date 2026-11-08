@@ -5,6 +5,9 @@
 # Install the commit referenced in model.py (search for "LTX-2 commit"):
 #   pip install "git+https://github.com/Lightricks/LTX-Video.git@a95ab856"
 
+# LTX-Video library (Lightricks) — commit pinned; bump hash here to re-install
+git+https://github.com/Lightricks/LTX-Video.git@a95ab856
+
 # Web service
 fastapi==0.115.0
 uvicorn[standard]==0.30.6

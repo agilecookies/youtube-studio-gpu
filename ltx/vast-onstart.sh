@@ -35,16 +35,18 @@ REQS="${REPO_DIR}/ltx/requirements.txt"
 REQS_HASH="$(sha256sum "${REQS}" | awk '{print $1}')"
 CACHED_HASH="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
 if [ "${REQS_HASH}" != "${CACHED_HASH}" ]; then
-  echo "[STEP 2/4] Installing LTX dependencies..."
-  # Install ltx_pipelines from Lightricks (commit pinned in model.py)
-  pip install --quiet "git+https://github.com/Lightricks/LTX-Video.git@a95ab856" 2>&1 | tail -3
-  pip install --quiet -r "${REQS}"
+  echo "[STEP 2/4] Installing LTX dependencies (uv)..."
+  STEP2_START=$(date +%s)
+  pip install --quiet uv
+  uv pip install --system --quiet \
+    -r "${REQS}" \
+    -c "${REPO_DIR}/ltx/constraints.txt"
   # tesseract binary for OCR QC
   apt-get install -y -qq tesseract-ocr 2>/dev/null || true
   echo "${REQS_HASH}" > "${REQS_HASH_FILE}"
-  echo "[STEP 2/4] Dependencies installed."
+  echo "[STEP 2/4] pip done in $(( $(date +%s) - STEP2_START ))s"
 else
-  echo "[STEP 2/4] Dependencies unchanged — skipping pip install."
+  echo "[STEP 2/4] Dependencies unchanged — skipping."
 fi
 
 # ── Download model weights if missing ────────────────────────────────────────
