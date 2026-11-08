@@ -95,6 +95,7 @@ _ref_cond_ok   = False         # True when native FLUX.2 pipeline loaded success
 _model_load_started_at: Optional[str] = None
 _model_ready_at:        Optional[str] = None
 _model_load_seconds:    Optional[float] = None
+_model_load_error:      Optional[str] = None   # Full traceback if load failed
 
 _jobs: dict[str, dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -130,15 +131,19 @@ class JobStatusResponse(BaseModel):
     duration_seconds: Optional[float] = None
     output_file:   Optional[str] = None
     error:         Optional[str] = None
+    traceback:     Optional[str] = None
     telemetry:     Optional[dict] = None
 
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
+    model_load_error: Optional[str] = None
     reference_conditioning: bool
     model_id: str
     device: str
     startup_seconds: float
+    free_vram_gb: Optional[float] = None
+    total_vram_gb: Optional[float] = None
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
@@ -149,9 +154,31 @@ def _detect_device() -> str:
         return "mps"
     return "cpu"
 
+def _normalize_transformer_layout(model_dir: str) -> None:
+    """
+    FLUX.2-klein-4B stores the transformer checkpoint at the repo root as
+    flux-2-klein-4b.safetensors.  Diffusers expects it at
+    transformer/diffusion_pytorch_model.safetensors.  Create a symlink so
+    from_pretrained can find it without re-downloading.
+    """
+    from pathlib import Path as _Path
+    t_dir  = _Path(model_dir) / "transformer"
+    target = t_dir / "diffusion_pytorch_model.safetensors"
+    if not t_dir.exists() or target.exists() or target.is_symlink():
+        return
+    root_sf = sorted(_Path(model_dir).glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+    if not root_sf:
+        return
+    src_name = root_sf[0].name
+    target.symlink_to(f"../{src_name}")
+    logger.info("Linked FLUX transformer: transformer/diffusion_pytorch_model.safetensors -> ../%s", src_name)
+
+
 def _load_models() -> None:
-    global _pipeline, _model_loaded, _ref_cond_ok
+    global _pipeline, _model_loaded, _ref_cond_ok, _model_load_error
     global _model_load_started_at, _model_ready_at, _model_load_seconds
+
+    import traceback as _tb
 
     _model_load_started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.time()
@@ -159,11 +186,14 @@ def _load_models() -> None:
 
     logger.info("Loading FLUX pipeline: %s on %s", FLUX_MODEL_ID, device)
     try:
-        # Prefer the native Flux2KleinKVPipeline class (available in diffusers ≥ 0.32).
-        # Fall back to DiffusionPipeline auto-detection for environments where the
-        # specific class is not yet exported.
         model_path = FLUX_MODEL_DIR if os.path.isdir(FLUX_MODEL_DIR) else FLUX_MODEL_ID
         logger.info("Loading from: %s", model_path)
+
+        # FLUX.2-klein-4B keeps the transformer at the repo root; diffusers expects it
+        # in transformer/.  Create a symlink if needed before from_pretrained runs.
+        if os.path.isdir(model_path):
+            _normalize_transformer_layout(model_path)
+
         _token = os.environ.get("HF_TOKEN")
         try:
             from diffusers import Flux2KleinPipeline
@@ -184,8 +214,6 @@ def _load_models() -> None:
 
         pipe.to(device)
 
-        # Log the actual resolved pipeline class for verification.
-        # Native reference conditioning is via the image= argument, not IP-Adapter.
         pipe_cls_name = type(pipe).__name__
         logger.info("Loaded pipeline class: %s", pipe_cls_name)
 
@@ -197,7 +225,8 @@ def _load_models() -> None:
             pipe_cls_name,
         )
     except Exception as exc:
-        logger.error("Failed to load FLUX pipeline: %s", exc)
+        _model_load_error = f"{exc}\n{_tb.format_exc()}"
+        logger.error("Failed to load FLUX pipeline:\n%s", _model_load_error)
         _model_loaded = False
         _ref_cond_ok = False
         _model_load_seconds = time.time() - t0
@@ -207,6 +236,17 @@ def _load_models() -> None:
     _model_loaded = True
     _model_load_seconds = time.time() - t0
     _model_ready_at = datetime.now(timezone.utc).isoformat()
+
+    if device == "cuda" and torch.cuda.is_available():
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(0)
+            logger.info(
+                "VRAM after model load: free=%.1f GB  used=%.1f GB  total=%.1f GB",
+                free_b / 1e9, (total_b - free_b) / 1e9, total_b / 1e9,
+            )
+        except Exception:
+            pass
+
     logger.info("Model ready in %.1fs. reference_conditioning=%s", _model_load_seconds, _ref_cond_ok)
 
 
@@ -221,13 +261,25 @@ async def startup_event() -> None:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     device = _detect_device()
+    status = "ok" if _model_loaded else ("error" if _model_load_error else "loading")
+    free_vram, total_vram = None, None
+    if device == "cuda" and torch.cuda.is_available():
+        try:
+            f, t = torch.cuda.mem_get_info(0)
+            free_vram  = round(f / 1e9, 2)
+            total_vram = round(t / 1e9, 2)
+        except Exception:
+            pass
     return HealthResponse(
-        status="ok" if _model_loaded else "loading",
+        status=status,
         model_loaded=_model_loaded,
+        model_load_error=_model_load_error,
         reference_conditioning=_ref_cond_ok,
         model_id=FLUX_MODEL_ID,
         device=device,
         startup_seconds=round(time.time() - SERVICE_START, 1),
+        free_vram_gb=free_vram,
+        total_vram_gb=total_vram,
     )
 
 # ── Generation ────────────────────────────────────────────────────────────────
@@ -351,13 +403,16 @@ def _run_generation(job_id: str, req: GenerateRequest) -> None:
         logger.info("Job %s complete in %.2fs → %s", job_id, generation_seconds, filename)
 
     except Exception as exc:
+        import traceback as _tb
+        tb_str = _tb.format_exc()
         finished_at = datetime.now(timezone.utc).isoformat()
-        logger.error("Job %s failed: %s", job_id, exc)
+        logger.error("Job %s failed:\n%s", job_id, tb_str)
         job.update({
             "status":      "failed",
             "finished_at": finished_at,
             "duration_seconds": round(time.time() - t_start, 2),
             "error":       str(exc),
+            "traceback":   tb_str,
         })
 
 

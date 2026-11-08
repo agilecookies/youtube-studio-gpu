@@ -188,6 +188,17 @@ finally:
 elapsed   = time.time() - t0
 final_gb  = _dir_bytes(local_path) / 1e9
 print(f"[STEP 3/4] download done in {elapsed:.0f}s, {final_gb:.2f} GB", flush=True)
+
+# FLUX.2-klein-4B stores the transformer at the repo root as flux-2-klein-4b.safetensors.
+# Diffusers expects transformer/diffusion_pytorch_model.safetensors.  Symlink it now so
+# app.py's from_pretrained() can find it without touching the downloaded files.
+_t_dir  = local_path / "transformer"
+_target = _t_dir / "diffusion_pytorch_model.safetensors"
+if _t_dir.exists() and not _target.exists() and not _target.is_symlink():
+    _root_sf = sorted(local_path.glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+    if _root_sf:
+        _target.symlink_to(f"../{_root_sf[0].name}")
+        print(f"[STEP 3/4] linked transformer: {_root_sf[0].name} -> transformer/diffusion_pytorch_model.safetensors", flush=True)
 PYEOF
 echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
 
