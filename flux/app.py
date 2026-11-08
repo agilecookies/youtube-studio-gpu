@@ -442,7 +442,7 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
     }
 
     loop = asyncio.get_event_loop()
-    asyncio.create_task(loop.run_in_executor(_executor, _run_generation, job_id, req))
+    asyncio.ensure_future(loop.run_in_executor(_executor, _run_generation, job_id, req))
     logger.info("Job %s queued (seed=%d, %dx%d, %d refs)", job_id, req.seed, req.width, req.height, len(req.references))
     return GenerateResponse(job_id=job_id, status="queued")
 
