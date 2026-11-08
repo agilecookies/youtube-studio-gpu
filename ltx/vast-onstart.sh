@@ -17,25 +17,29 @@ mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 mkdir -p "${MODEL_DIR}/diffusion_models" "${MODEL_DIR}/text_encoders" "${MODEL_DIR}/vae"
 mkdir -p "${MODEL_DIR}/model_patches" "${MODEL_DIR}/latent_upscale_models"
 
+echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
+
 # ── Install dependencies (skip if unchanged) ──────────────────────────────────
 
 REQS="${REPO_DIR}/ltx/requirements.txt"
 REQS_HASH="$(sha256sum "${REQS}" | awk '{print $1}')"
 CACHED_HASH="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
 if [ "${REQS_HASH}" != "${CACHED_HASH}" ]; then
-  echo "[onstart] Installing LTX dependencies..."
+  echo "[STEP 2/4] Installing LTX dependencies..."
   # Install ltx_pipelines from Lightricks (commit pinned in model.py)
   pip install --quiet "git+https://github.com/Lightricks/LTX-Video.git@a95ab856" 2>&1 | tail -3
   pip install --quiet -r "${REQS}"
   # tesseract binary for OCR QC
   apt-get install -y -qq tesseract-ocr 2>/dev/null || true
   echo "${REQS_HASH}" > "${REQS_HASH_FILE}"
-  echo "[onstart] Dependencies installed."
+  echo "[STEP 2/4] Dependencies installed."
 else
-  echo "[onstart] Dependencies unchanged — skipping pip install."
+  echo "[STEP 2/4] Dependencies unchanged — skipping pip install."
 fi
 
 # ── Download model weights if missing ────────────────────────────────────────
+
+echo "[STEP 3/4] Checking model weights..."
 
 REQUIRED_FILES=(
   "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
@@ -69,10 +73,12 @@ for f in "${REQUIRED_FILES[@]}"; do
   echo "[onstart] -> ${f} ($(du -sh "${dest}" | cut -f1))"
 done
 
+echo "[STEP 3/4] Model weights ready."
+
 # ── Start service ─────────────────────────────────────────────────────────────
 
 cd "${REPO_DIR}/ltx"
-echo "[onstart] Starting LTX service on port ${PORT}..."
+echo "[STEP 4/4] Starting LTX service on port ${PORT}..."
 nohup python3 app.py >> "${LOG_FILE}" 2>&1 &
 echo $! > /workspace/.ltx-service.pid
-echo "[onstart] LTX service started (PID $(cat /workspace/.ltx-service.pid)). Logs: ${LOG_FILE}"
+echo "[STEP 4/4] LTX service started (PID $(cat /workspace/.ltx-service.pid)). Logs: ${LOG_FILE}"

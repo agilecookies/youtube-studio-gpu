@@ -12,24 +12,26 @@ REQS_HASH_FILE="/workspace/.flux-reqs-hash"
 
 export HF_HOME
 
+echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
+
 # ── Install dependencies (skip if unchanged) ──────────────────────────────────
 
 REQS="${REPO_DIR}/flux/requirements.txt"
 REQS_HASH="$(sha256sum "${REQS}" | awk '{print $1}')"
 CACHED_HASH="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
 if [ "${REQS_HASH}" != "${CACHED_HASH}" ]; then
-  echo "[onstart] Installing FLUX dependencies..."
+  echo "[STEP 2/4] Installing FLUX dependencies..."
   pip install --quiet -r "${REQS}"
   echo "${REQS_HASH}" > "${REQS_HASH_FILE}"
-  echo "[onstart] Dependencies installed."
+  echo "[STEP 2/4] Dependencies installed."
 else
-  echo "[onstart] Dependencies unchanged — skipping pip install."
+  echo "[STEP 2/4] Dependencies unchanged — skipping pip install."
 fi
 
 # ── Download model weights if missing ────────────────────────────────────────
 
 if [ ! -d "${FLUX_MODEL_DIR}" ] || [ -z "$(ls -A "${FLUX_MODEL_DIR}" 2>/dev/null)" ]; then
-  echo "[onstart] Downloading FLUX.2-klein-4B weights to ${FLUX_MODEL_DIR}..."
+  echo "[STEP 3/4] Downloading FLUX.2-klein-4B weights to ${FLUX_MODEL_DIR}..."
   python3 - <<'PYEOF'
 import os, sys
 try:
@@ -40,18 +42,18 @@ try:
         token=os.environ.get("HF_TOKEN"),
         ignore_patterns=["*.md", "*.txt", "*.bin"],
     )
-    print("[onstart] Model weights downloaded.")
+    print("[STEP 3/4] Model weights downloaded.")
 except Exception as e:
-    print(f"[onstart] WARNING: weight download failed ({e}). Service will download on first load.")
+    print(f"[STEP 3/4] WARNING: weight download failed ({e}). Service will download on first load.")
 PYEOF
 else
-  echo "[onstart] Model weights already present at ${FLUX_MODEL_DIR}."
+  echo "[STEP 3/4] Model weights already present at ${FLUX_MODEL_DIR}."
 fi
 
 # ── Start service ─────────────────────────────────────────────────────────────
 
 cd "${REPO_DIR}/flux"
-echo "[onstart] Starting FLUX service on port ${PORT}..."
+echo "[STEP 4/4] Starting FLUX service on port ${PORT}..."
 nohup python3 app.py >> "${LOG_FILE}" 2>&1 &
 echo $! > /workspace/.flux-service.pid
-echo "[onstart] FLUX service started (PID $(cat /workspace/.flux-service.pid)). Logs: ${LOG_FILE}"
+echo "[STEP 4/4] FLUX service started (PID $(cat /workspace/.flux-service.pid)). Logs: ${LOG_FILE}"
