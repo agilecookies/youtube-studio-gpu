@@ -1,0 +1,16 @@
+# LTX-2.5 video generation service dependencies
+# Pin patch versions for reproducible builds; bump intentionally.
+#
+# ltx_pipelines and ltx_core come from the Lightricks LTX-Video repo.
+# Install the commit referenced in model.py (search for "LTX-2 commit"):
+#   pip install "git+https://github.com/Lightricks/LTX-Video.git@a95ab856"
+
+# Web service
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+requests==2.32.3
+
+# OCR — text detection QC (tesseract binary must also be installed via apt)
+Pillow==10.4.0
+pytesseract==0.3.10
