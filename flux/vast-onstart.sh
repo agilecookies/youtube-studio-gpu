@@ -77,6 +77,14 @@ MODEL_ID  = "black-forest-labs/FLUX.2-klein-4B"
 # Fast exit on restart when weights already present.
 if Path(local_dir, "model_index.json").exists():
     print("[STEP 3/4] Model weights already present — skipping download.", flush=True)
+    # Ensure symlink exists even on restart (first run may have crashed after download but before symlink).
+    _t_dir  = Path(local_dir) / "transformer"
+    _target = _t_dir / "diffusion_pytorch_model.safetensors"
+    if _t_dir.exists() and not _target.exists() and not _target.is_symlink():
+        _root_sf = sorted(Path(local_dir).glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+        if _root_sf:
+            _target.symlink_to(f"../{_root_sf[0].name}")
+            print(f"[STEP 3/4] linked transformer (restart): {_root_sf[0].name}", flush=True)
     sys.exit(0)
 
 from huggingface_hub import HfApi, login, snapshot_download
@@ -145,15 +153,15 @@ class _Monitor(threading.Thread):
 
     def __init__(self, local, expected_gb):
         super().__init__()
-        self.local       = local
-        self.expected_gb = expected_gb
-        self._stop       = threading.Event()
-        self._prev       = 0
-        self._slow_since = None
-        self._start_time = time.time()
+        self.local         = local
+        self.expected_gb   = expected_gb
+        self._done_event   = threading.Event()   # renamed: Thread._stop is an internal method
+        self._prev         = 0
+        self._slow_since   = None
+        self._start_time   = time.time()
 
     def run(self):
-        while not self._stop.wait(self.INTERVAL):
+        while not self._done_event.wait(self.INTERVAL):
             cur     = _dir_bytes(self.local)
             speed   = (cur - self._prev) / (self.INTERVAL * 1e6)
             elapsed = time.time() - self._start_time
@@ -182,7 +190,7 @@ class _Monitor(threading.Thread):
                 self._slow_since = None
 
     def stop(self):
-        self._stop.set()
+        self._done_event.set()
 
 
 local_path = Path(local_dir)

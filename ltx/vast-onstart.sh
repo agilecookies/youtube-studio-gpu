@@ -154,15 +154,15 @@ class _Monitor(threading.Thread):
 
     def __init__(self, local, expected_gb):
         super().__init__()
-        self.local       = local
-        self.expected_gb = expected_gb
-        self._stop       = threading.Event()
-        self._prev       = 0
-        self._slow_since = None
-        self._start_time = time.time()
+        self.local         = local
+        self.expected_gb   = expected_gb
+        self._done_event   = threading.Event()   # renamed: Thread._stop is an internal method
+        self._prev         = 0
+        self._slow_since   = None
+        self._start_time   = time.time()
 
     def run(self):
-        while not self._stop.wait(self.INTERVAL):
+        while not self._done_event.wait(self.INTERVAL):
             cur     = _dir_bytes(self.local)
             speed   = (cur - self._prev) / (self.INTERVAL * 1e6)
             elapsed = time.time() - self._start_time
@@ -190,7 +190,7 @@ class _Monitor(threading.Thread):
                 self._slow_since = None
 
     def stop(self):
-        self._stop.set()
+        self._done_event.set()
 
 
 local_path = Path(local_dir)
