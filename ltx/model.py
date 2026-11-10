@@ -144,11 +144,31 @@ def _ocr_gate(video_path: str, num_frames: int, confidence_threshold: float = 0.
                     return {"passed": False, "detail": detail}
 
                 img = Image.open(out_path)
+                img_height = img.height or 1
                 data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
                 for i, text in enumerate(data["text"]):
                     conf = data["conf"][i]
-                    if text.strip() and isinstance(conf, (int, float)) and conf >= confidence_threshold * 100:
-                        text_detections.append(f"pos {pos:.0%}: '{text}' (conf {conf:.0f})")
+                    token = text.strip()
+                    if not (token and isinstance(conf, (int, float)) and conf >= confidence_threshold * 100):
+                        continue
+
+                    # Ignore 1–2 char tokens: single-letter brand icons (e.g. 'N', 'G')
+                    # on character clothing must not trigger the OCR gate.
+                    if len(token) <= 2:
+                        continue
+
+                    # Check if this token is in the lower-third of the frame.
+                    # pytesseract's 'top' is in pixels from the top of the image.
+                    # Anything with top > 70% of frame height is the caption/subtitle zone.
+                    word_top = data["top"][i] if i < len(data["top"]) else 0
+                    in_lower_third = word_top > img_height * 0.70
+
+                    if in_lower_third:
+                        text_detections.append(
+                            f"pos {pos:.0%}: CAPTION '{token}' at y={word_top}/{img_height} (conf {conf:.0f})"
+                        )
+                    else:
+                        text_detections.append(f"pos {pos:.0%}: '{token}' (conf {conf:.0f})")
 
     except subprocess.TimeoutExpired:
         detail = "OCR timed out — clip requires owner review"

@@ -483,6 +483,93 @@ def download_output(filename: str) -> FileResponse:
     return FileResponse(path, media_type="image/png")
 
 
+# ── Face comparison — reference QC ───────────────────────────────────────────
+
+class CompareFacesRequest(BaseModel):
+    image_a: str  # base64-encoded PNG or JPEG
+    image_b: str  # base64-encoded PNG or JPEG
+
+
+class CompareFacesResponse(BaseModel):
+    similarity: Optional[float]   # 0–1; null when no_face_detected
+    no_face_detected: bool        # True for 3D/stylized images where face detector found nothing
+    method: str                   # 'face_region_histogram' | 'histogram_fallback' | 'cv2_unavailable'
+
+
+def _histogram_similarity(img_a: Image.Image, img_b: Image.Image) -> float:
+    """
+    Cosine similarity between flattened RGB histogram vectors.
+    Fast PIL-only implementation; works for any image type including 3D renders.
+    """
+    a = img_a.convert("RGB").resize((64, 64))
+    b = img_b.convert("RGB").resize((64, 64))
+    hist_a = a.histogram()  # 256 bins × 3 channels = 768 ints
+    hist_b = b.histogram()
+    dot    = sum(x * y for x, y in zip(hist_a, hist_b))
+    norm_a = sum(x * x for x in hist_a) ** 0.5
+    norm_b = sum(x * x for x in hist_b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+@app.post("/compare-faces", response_model=CompareFacesResponse)
+def compare_faces(req: CompareFacesRequest) -> CompareFacesResponse:
+    """
+    Compare two images for character identity consistency.
+
+    Primary path (when opencv-python-headless is installed):
+      - Detect faces with Haar cascade in both images.
+      - If faces found in both: crop face regions, compare with histogram similarity.
+        Returns no_face_detected=False, method='face_region_histogram'.
+      - If no face found in either (3D/stylized character): fall back to full-image
+        histogram similarity. Returns no_face_detected=True, method='histogram_fallback'.
+        The TypeScript client will skip the similarity threshold and pass on non-face checks.
+
+    Fallback path (cv2 unavailable):
+      - Full-image histogram similarity, no_face_detected=False.
+        Returns method='cv2_unavailable'.
+    """
+    img_a = Image.open(io.BytesIO(base64.b64decode(req.image_a))).convert("RGB")
+    img_b = Image.open(io.BytesIO(base64.b64decode(req.image_b))).convert("RGB")
+
+    try:
+        import cv2          # type: ignore[import]
+        import numpy as np  # type: ignore[import]
+
+        arr_a  = np.array(img_a)
+        arr_b  = np.array(img_b)
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+        gray_a = cv2.cvtColor(arr_a, cv2.COLOR_RGB2GRAY)
+        gray_b = cv2.cvtColor(arr_b, cv2.COLOR_RGB2GRAY)
+        # scaleFactor/minNeighbors tuned for variety of face sizes; works on 576-wide images.
+        faces_a = cascade.detectMultiScale(gray_a, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+        faces_b = cascade.detectMultiScale(gray_b, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+
+        if len(faces_a) == 0 or len(faces_b) == 0:
+            # No face found — 3D or stylized character.
+            sim = _histogram_similarity(img_a, img_b)
+            logger.info("[compare-faces] No face detected — histogram fallback, similarity=%.3f", sim)
+            return CompareFacesResponse(similarity=sim, no_face_detected=True, method="histogram_fallback")
+
+        # Crop largest face region in each image for a tighter comparison.
+        x, y, w, h = max(faces_a, key=lambda r: r[2] * r[3])
+        face_a = Image.fromarray(arr_a[y:y+h, x:x+w])
+        x, y, w, h = max(faces_b, key=lambda r: r[2] * r[3])
+        face_b = Image.fromarray(arr_b[y:y+h, x:x+w])
+
+        sim = _histogram_similarity(face_a, face_b)
+        logger.info("[compare-faces] Face detected — similarity=%.3f", sim)
+        return CompareFacesResponse(similarity=sim, no_face_detected=False, method="face_region_histogram")
+
+    except ImportError:
+        # opencv not installed — full-image histogram only
+        sim = _histogram_similarity(img_a, img_b)
+        logger.info("[compare-faces] cv2 unavailable — full histogram, similarity=%.3f", sim)
+        return CompareFacesResponse(similarity=sim, no_face_detected=False, method="cv2_unavailable")
+
+
 if __name__ == "__main__":
     _port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("app:app", host="0.0.0.0", port=_port, log_level="info")

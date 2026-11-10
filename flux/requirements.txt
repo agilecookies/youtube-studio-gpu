@@ -23,3 +23,7 @@ pydantic==2.9.2
 
 # Utilities
 requests==2.32.3
+
+# Face comparison QC — used by /compare-faces endpoint
+# headless variant: no GUI deps, works in containers without display
+opencv-python-headless>=4.9.0
