@@ -258,6 +258,32 @@ def load_pipeline() -> None:
     logger.info("Pipeline loaded in %.1f seconds (offload_mode=cpu)", _load_seconds)
 
 
+def warmup_inference() -> None:
+    """
+    Generate one tiny (256×256, 1s) clip to verify the pipeline works end-to-end.
+    Called once after load_pipeline() during service startup.
+    /health only reports model_loaded=true after this succeeds.
+    Raises on any failure so the service exits non-zero and the orchestrator
+    detects the error at boot rather than on the first real /generate request.
+    """
+    if _pipeline is None:
+        raise RuntimeError("Pipeline not loaded — call load_pipeline() first")
+    logger.info("[warmup] Running warm-up inference: 256×256, 1s, seed=0 ...")
+    t0 = time.time()
+    result = generate(
+        prompt="A solid blue square.",
+        duration_seconds=1,
+        aspect_ratio="1:1",
+        seed=0,
+        audio=False,
+        width=256,
+        height=256,
+        job_id="warmup",
+    )
+    elapsed = time.time() - t0
+    logger.info("[warmup] Warm-up succeeded in %.1fs → %s", elapsed, result.get("output_filename", "?"))
+
+
 def _strip_visual_output_rule(prompt: str) -> str:
     """Remove the enumerated 'VISUAL OUTPUT RULE' anti-text block from the positive
     prompt. Those tokens (captions/title cards/typography) cue diffusion models to

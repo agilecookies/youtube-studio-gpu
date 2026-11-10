@@ -217,10 +217,27 @@ def _load_models() -> None:
         pipe_cls_name = type(pipe).__name__
         logger.info("Loaded pipeline class: %s", pipe_cls_name)
 
+        # Warm-up: one tiny generation (256×256, 2 steps) to verify the pipeline
+        # is functional end-to-end before reporting ready.  This catches missing
+        # tokenizer files (e.g. chat_template.jinja) and any other pipeline error
+        # at boot time rather than on the first real /generate request.
+        logger.info("Warm-up inference: 256×256, 2 steps ...")
+        t_wu = time.time()
+        _ = pipe(
+            prompt="a solid blue square",
+            width=256,
+            height=256,
+            guidance_scale=GUIDANCE_SCALE,
+            num_inference_steps=2,
+            generator=torch.Generator(device=device).manual_seed(0),
+            num_images_per_prompt=1,
+        )
+        logger.info("Warm-up succeeded in %.1fs", time.time() - t_wu)
+
         _pipeline = pipe
         _ref_cond_ok = True
         logger.info(
-            "FLUX pipeline loaded — reference_conditioning=true (native image= path). "
+            "FLUX pipeline loaded and warm-up passed — reference_conditioning=true. "
             "Pipeline class: %s",
             pipe_cls_name,
         )

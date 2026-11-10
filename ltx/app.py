@@ -179,7 +179,9 @@ async def _preload_model() -> None:
             )
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, ltx_model.load_pipeline)
-        logger.info("[startup] LTX-2.5 pipeline loaded and ready")
+        logger.info("[startup] LTX-2.5 pipeline loaded — running warm-up inference...")
+        await loop.run_in_executor(None, ltx_model.warmup_inference)
+        logger.info("[startup] LTX-2.5 warm-up succeeded — service is ready")
     except Exception as exc:
         import traceback as _tb
         _model_load_error = f"{exc}\n{_tb.format_exc()}"

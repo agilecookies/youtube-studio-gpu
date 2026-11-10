@@ -102,21 +102,24 @@ def build_allow_patterns(model_index_path: Path) -> list:
     """
     Parse model_index.json to discover component dirs (transformer, text_encoder,
     text_encoder_2, vae, scheduler, tokenizer, tokenizer_2, …) and return
-    allow_patterns that cover every needed file including all safetensors shards,
-    shard index JSON, config JSON, tokenizer txt/model files, and root-level
-    safetensors (the FLUX.2-klein-4B transformer checkpoint lives at the repo root).
+    allow_patterns that cover the complete set of files each component needs.
+
+    For every component folder we use 'c/*' (no extension filter) so we always
+    download *.jinja, *.tiktoken, *.txt, *.json, *.safetensors, etc.  Missing
+    tokenizer files (e.g. chat_template.jinja for Qwen3-based models) caused
+    'tokenizer.chat_template is not set' on every /generate call.
+
+    Root-level '*.safetensors' is kept for the FLUX.2-klein-4B transformer
+    checkpoint, which lives at the repo root rather than inside transformer/.
+    Files outside the components that are NOT root-level safetensors are skipped.
     """
     idx   = json.loads(model_index_path.read_text())
     comps = [k for k in idx if not k.startswith("_")]
-    patterns = ["model_index.json", "*.safetensors"]  # root-level (transformer checkpoint)
+    # Root: model index + transformer checkpoint (repo-root safetensors for FLUX.2-klein-4B)
+    patterns = ["model_index.json", "*.safetensors"]
+    # Every component folder: all files, no extension filtering
     for c in comps:
-        patterns += [
-            f"{c}/*.safetensors",
-            f"{c}/*.safetensors.index.json",
-            f"{c}/*.json",
-            f"{c}/*.txt",
-            f"{c}/*.model",
-        ]
+        patterns.append(f"{c}/*")
     return patterns
 
 from huggingface_hub import HfApi, login, snapshot_download
