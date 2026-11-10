@@ -68,6 +68,8 @@ INFERENCE_STEPS = int(os.environ.get("FLUX_INFERENCE_STEPS", "4"))
 GUIDANCE_SCALE  = float(os.environ.get("FLUX_GUIDANCE_SCALE", "1.0"))
 OUTPUT_DIR      = Path(os.environ.get("OUTPUT_DIR", "/tmp/flux_outputs"))
 METRICS_FILE    = Path(os.environ.get("METRICS_FILE", "/workspace/flux-generation-metrics.jsonl"))
+# Set SKIP_MODEL_LOAD=1 to skip model loading at startup (import-check / dry-run mode).
+SKIP_MODEL_LOAD = os.environ.get("SKIP_MODEL_LOAD", "0") == "1"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -274,6 +276,9 @@ def _load_models() -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     """Load model at startup — DOES NOT generate any images automatically."""
+    if SKIP_MODEL_LOAD:
+        logger.info("SKIP_MODEL_LOAD=1 — skipping model load (import-check / dry-run mode)")
+        return
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_executor, _load_models)
     if not _model_loaded:

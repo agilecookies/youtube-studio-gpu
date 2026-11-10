@@ -58,6 +58,8 @@ SERVICE_START = time.time()
 # Watchdog ceiling in seconds.  0 (or unset) = DISABLED.  Never defaults to a
 # non-zero value so the service does not self-terminate unexpectedly.
 MAX_RUNTIME   = int(os.environ.get("LTX_MAX_RUNTIME_SECONDS", "0"))
+# Set SKIP_MODEL_LOAD=1 to skip model loading at startup (import-check / dry-run mode).
+SKIP_MODEL_LOAD = os.environ.get("SKIP_MODEL_LOAD", "0") == "1"
 OUTPUT_DIR    = Path(os.environ.get("LTX_OUTPUT_DIR",    "/workspace/ltx/outputs"))
 LOG_DIR       = Path(os.environ.get("LTX_LOG_DIR",      "/workspace/ltx/logs"))
 # Staging area for conditioning images uploaded from the Video Engine.
@@ -226,6 +228,10 @@ async def _startup() -> None:
     else:
         logger.info("Watchdog:       DISABLED (LTX_MAX_RUNTIME_SECONDS=0 or unset)")
 
+    if SKIP_MODEL_LOAD:
+        logger.info("SKIP_MODEL_LOAD=1 — skipping model load (import-check / dry-run mode)")
+        logger.info("=== LTX-2.5 service starting — model load skipped ===")
+        return
     asyncio.create_task(_preload_model())
     logger.info("=== LTX-2.5 service starting — model loading in background ===")
 
