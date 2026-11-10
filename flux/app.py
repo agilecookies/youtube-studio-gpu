@@ -231,7 +231,11 @@ def _load_models() -> None:
         _ref_cond_ok = False
         _model_load_seconds = time.time() - t0
         _model_ready_at = datetime.now(timezone.utc).isoformat()
-        return
+        # Flush logs so the orchestrator's boot-log fetch captures the error before the process exits.
+        import sys as _sys
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        return  # startup_event will call os._exit(1) after this returns
 
     _model_loaded = True
     _model_load_seconds = time.time() - t0
@@ -255,13 +259,20 @@ async def startup_event() -> None:
     """Load model at startup — DOES NOT generate any images automatically."""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_executor, _load_models)
+    if not _model_loaded:
+        logger.critical(
+            "FLUX pipeline failed to load — exiting to prevent serving in broken state. "
+            "Check data/flux-logs/ for the boot log."
+        )
+        import os as _os
+        _os._exit(1)
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     device = _detect_device()
-    status = "ok" if _model_loaded else ("error" if _model_load_error else "loading")
+    status = "ready" if _model_loaded else ("error" if _model_load_error else "loading")
     free_vram, total_vram = None, None
     if device == "cuda" and torch.cuda.is_available():
         try:

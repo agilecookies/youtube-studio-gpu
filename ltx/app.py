@@ -70,6 +70,7 @@ _MAX_ASSET_BYTES = 10 * 1024 * 1024  # 10 MB
 
 _current_job: Optional[dict] = None
 _last_gen_seconds: Optional[float] = None
+_model_load_error: Optional[str] = None
 
 
 def _pod_started_at_iso() -> Optional[str]:
@@ -160,6 +161,35 @@ def _attempt_self_terminate() -> None:
         logger.error("Watchdog: RunPod terminate API failed: %s", exc)
 
 
+async def _preload_model() -> None:
+    """
+    Load LTX-2.5 pipeline at service startup in a background thread so /health
+    reports model_loaded=true (and status="ready") as soon as the pipeline is
+    ready. Exits non-zero if loading fails so the orchestrator detects the failure
+    immediately rather than waiting for the health-poll timeout.
+    """
+    global _model_load_error
+    logger.info("[startup] Pre-loading LTX-2.5 pipeline in background...")
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA not available — no GPU assigned to this container. "
+                "Verify Vast.ai instance has a GPU allocated."
+            )
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, ltx_model.load_pipeline)
+        logger.info("[startup] LTX-2.5 pipeline loaded and ready")
+    except Exception as exc:
+        import traceback as _tb
+        _model_load_error = f"{exc}\n{_tb.format_exc()}"
+        logger.critical("[startup] LTX-2.5 pipeline FAILED to load: %s — exiting", exc)
+        import sys as _sys
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        os._exit(1)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     pod_id = os.environ.get("RUNPOD_POD_ID", "unknown")
@@ -194,7 +224,8 @@ async def _startup() -> None:
     else:
         logger.info("Watchdog:       DISABLED (LTX_MAX_RUNTIME_SECONDS=0 or unset)")
 
-    logger.info("=== LTX-2.5 service ready ===")
+    asyncio.create_task(_preload_model())
+    logger.info("=== LTX-2.5 service starting — model loading in background ===")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -206,12 +237,13 @@ def health() -> HealthResponse:
     Used by RunPod health checks and by npm run ltx:health.
     """
     gpu_info = _gpu_info()
+    loaded = ltx_model.is_loaded()
     return HealthResponse(
-        status="ok",
+        status="ready" if loaded else ("error" if _model_load_error else "loading"),
         provider="ltx-2.5",
         gpu_available=gpu_info is not None,
         model_files_present=ltx_model.model_files_present(),
-        model_loaded=ltx_model.is_loaded(),
+        model_loaded=loaded,
     )
 
 

@@ -56,7 +56,7 @@ except Exception:
 echo "[STEP 3/4] Checking FLUX.2-klein-4B weights..."
 STEP3_START=$(date +%s)
 python3 - <<'PYEOF'
-import fnmatch, os, sys, threading, time
+import fnmatch, json, os, sys, threading, time
 from pathlib import Path
 
 # Disable XET for bulk download — XET cold-start is 0.0-0.4 MB/s and triggers
@@ -70,52 +70,102 @@ try:
 except ImportError:
     print("[STEP 3/4] fast backend: standard", flush=True)
 
-local_dir = os.environ["FLUX_MODEL_DIR"]
-token     = os.environ["HF_TOKEN"]
-MODEL_ID  = "black-forest-labs/FLUX.2-klein-4B"
+local_dir  = os.environ["FLUX_MODEL_DIR"]
+token      = os.environ["HF_TOKEN"]
+MODEL_ID   = "black-forest-labs/FLUX.2-klein-4B"
+local_path = Path(local_dir)
 
-# Fast exit on restart when weights already present.
-if Path(local_dir, "model_index.json").exists():
-    print("[STEP 3/4] Model weights already present — skipping download.", flush=True)
-    # Ensure symlink exists even on restart (first run may have crashed after download but before symlink).
-    _t_dir  = Path(local_dir) / "transformer"
-    _target = _t_dir / "diffusion_pytorch_model.safetensors"
-    if _t_dir.exists() and not _target.exists() and not _target.is_symlink():
-        _root_sf = sorted(Path(local_dir).glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
-        if _root_sf:
-            _target.symlink_to(f"../{_root_sf[0].name}")
-            print(f"[STEP 3/4] linked transformer (restart): {_root_sf[0].name}", flush=True)
-    sys.exit(0)
+# ── Shard integrity check ─────────────────────────────────────────────────────
+def check_shard_integrity(base: Path) -> list:
+    """
+    For every *.safetensors.index.json under base, verify every shard listed in
+    weight_map exists on disk with size > 0. Returns missing/empty shard paths.
+    Partial downloads leave model_index.json present but shards absent; this
+    catches that state so the fast-exit path does not silently skip re-download.
+    """
+    missing = []
+    for idx_file in base.rglob("*.safetensors.index.json"):
+        try:
+            idx = json.loads(idx_file.read_text())
+            for shard in sorted(set(idx.get("weight_map", {}).values())):
+                p = idx_file.parent / shard
+                if not p.exists():
+                    missing.append(str(p.relative_to(base)))
+                elif p.stat().st_size == 0:
+                    missing.append(f"{p.relative_to(base)} (zero bytes)")
+        except Exception as e:
+            missing.append(f"{idx_file.relative_to(base)} (unreadable: {e})")
+    return missing
+
+# ── Build allow_patterns from model_index.json ────────────────────────────────
+def build_allow_patterns(model_index_path: Path) -> list:
+    """
+    Parse model_index.json to discover component dirs (transformer, text_encoder,
+    text_encoder_2, vae, scheduler, tokenizer, tokenizer_2, …) and return
+    allow_patterns that cover every needed file including all safetensors shards,
+    shard index JSON, config JSON, tokenizer txt/model files, and root-level
+    safetensors (the FLUX.2-klein-4B transformer checkpoint lives at the repo root).
+    """
+    idx   = json.loads(model_index_path.read_text())
+    comps = [k for k in idx if not k.startswith("_")]
+    patterns = ["model_index.json", "*.safetensors"]  # root-level (transformer checkpoint)
+    for c in comps:
+        patterns += [
+            f"{c}/*.safetensors",
+            f"{c}/*.safetensors.index.json",
+            f"{c}/*.json",
+            f"{c}/*.txt",
+            f"{c}/*.model",
+        ]
+    return patterns
 
 from huggingface_hub import HfApi, login, snapshot_download
 
 login(token=token, add_to_git_credential=False)
-api = HfApi()
+local_path.mkdir(parents=True, exist_ok=True)
+model_index_path = local_path / "model_index.json"
 
-# ── List repo files ───────────────────────────────────────────────────────────
+# ── Fast exit on restart: skip only when all shards verified present ──────────
+# model_index.json existing is NOT sufficient — a partial download leaves it in
+# place while component shards are still missing. check_shard_integrity() reads
+# every *.safetensors.index.json and confirms each listed shard is on disk.
+if model_index_path.exists():
+    missing = check_shard_integrity(local_path)
+    if not missing:
+        print("[STEP 3/4] Model weights already present and verified — skipping download.", flush=True)
+        _t_dir  = local_path / "transformer"
+        _target = _t_dir / "diffusion_pytorch_model.safetensors"
+        if _t_dir.exists() and not _target.exists() and not _target.is_symlink():
+            _root_sf = sorted(local_path.glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+            if _root_sf:
+                _target.symlink_to(f"../{_root_sf[0].name}")
+                print(f"[STEP 3/4] linked transformer (restart): {_root_sf[0].name}", flush=True)
+        sys.exit(0)
+    else:
+        print(f"[STEP 3/4] model_index.json present but {len(missing)} shard(s) missing — will re-download:", flush=True)
+        for f in missing[:10]:
+            print(f"  missing: {f}", flush=True)
+
+# ── Determine allow_patterns ──────────────────────────────────────────────────
+# If model_index.json is absent (first boot), download it alone first so we can
+# read the component list before choosing allow_patterns for the main download.
+if not model_index_path.exists():
+    print("[STEP 3/4] Fetching model_index.json to determine components...", flush=True)
+    snapshot_download(MODEL_ID, local_dir=local_dir, token=token,
+                      allow_patterns=["model_index.json"])
+
+allow_patterns = build_allow_patterns(model_index_path)
+print(f"[STEP 3/4] allow_patterns ({len(allow_patterns)}): {allow_patterns}", flush=True)
+
+# ── List repo files for progress monitor size estimate ────────────────────────
 print(f"[STEP 3/4] Fetching file list for {MODEL_ID}...", flush=True)
+api  = HfApi()
 info = api.model_info(MODEL_ID, files_metadata=True, token=token)
 all_files = {s.rfilename: (s.size or 0) for s in (info.siblings or [])}
-total_remote_gb = sum(all_files.values()) / 1e9
-print(f"[STEP 3/4] Repo: {len(all_files)} files, {total_remote_gb:.2f} GB total", flush=True)
-for fname, size in sorted(all_files.items(), key=lambda x: -x[1])[:15]:
-    print(f"  {size/1e6:>8.1f} MB  {fname}", flush=True)
-
-# ── Ignore patterns ───────────────────────────────────────────────────────────
-# Diffusers Flux2KleinPipeline loads: model_index.json, transformer/,
-# text_encoder/, text_encoder_2/, vae/, scheduler/, tokenizer/, tokenizer_2/
-# Skip: GGUF quantized variants, .ckpt single-file checkpoints,
-#        .bin PyTorch checkpoints (safetensors preferred), docs.
-IGNORE = ["*.gguf", "*.ckpt", "*.bin", "*.md"]
-# Skip fp32 variants when bf16 equivalents exist in the same repo.
-if any("bf16" in f or "bfloat16" in f for f in all_files):
-    IGNORE += ["*fp32*", "*float32*"]
-
-to_download = {f: s for f, s in all_files.items()
-               if not any(fnmatch.fnmatch(f, p) for p in IGNORE)}
-dl_gb = sum(to_download.values()) / 1e9
-print(f"[STEP 3/4] Will download: {len(to_download)} files, {dl_gb:.2f} GB", flush=True)
-for fname, size in sorted(to_download.items(), key=lambda x: -x[1])[:10]:
+dl_gb = sum(s for f, s in all_files.items()
+            if any(fnmatch.fnmatch(f, p) for p in allow_patterns)) / 1e9
+print(f"[STEP 3/4] Repo: {len(all_files)} files; will download up to {dl_gb:.2f} GB", flush=True)
+for fname, size in sorted(all_files.items(), key=lambda x: -x[1])[:10]:
     print(f"  {size/1e6:>8.1f} MB  {fname}", flush=True)
 
 
@@ -193,8 +243,6 @@ class _Monitor(threading.Thread):
         self._done_event.set()
 
 
-local_path = Path(local_dir)
-local_path.mkdir(parents=True, exist_ok=True)
 monitor = _Monitor(local_path, dl_gb)
 monitor.start()
 t0 = time.time()
@@ -204,7 +252,7 @@ try:
         MODEL_ID,
         local_dir=local_dir,
         token=token,
-        ignore_patterns=IGNORE,
+        allow_patterns=allow_patterns,
     )
 finally:
     monitor.stop()
@@ -214,6 +262,24 @@ elapsed   = time.time() - t0
 final_gb  = _dir_bytes(local_path) / 1e9
 print(f"[STEP 3/4] download done in {elapsed:.0f}s, {final_gb:.2f} GB", flush=True)
 
+# ── Post-download shard verification (retry once if anything missing) ─────────
+for attempt in range(1, 3):
+    missing = check_shard_integrity(local_path)
+    if not missing:
+        print("[STEP 3/4] All shard files verified present.", flush=True)
+        break
+    if attempt == 1:
+        print(f"[STEP 3/4] {len(missing)} shard(s) still missing after download — retrying:", flush=True)
+        for f in missing[:10]:
+            print(f"  missing: {f}", flush=True)
+        snapshot_download(MODEL_ID, local_dir=local_dir, token=token,
+                          allow_patterns=allow_patterns)
+    else:
+        for f in missing:
+            print(f"[BOOT] FAILED: missing {f}", flush=True)
+        sys.exit(1)
+
+# ── Transformer symlink ───────────────────────────────────────────────────────
 # FLUX.2-klein-4B stores the transformer at the repo root as flux-2-klein-4b.safetensors.
 # Diffusers expects transformer/diffusion_pytorch_model.safetensors.  Symlink it now so
 # app.py's from_pretrained() can find it without touching the downloaded files.

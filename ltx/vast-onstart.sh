@@ -213,6 +213,24 @@ finally:
 elapsed  = time.time() - t0
 final_gb = sum(all_remote.get(f, 0) for f in REQUIRED if Path(local_dir, f).exists()) / 1e9
 print(f"[STEP 3/4] download done in {elapsed:.0f}s, {final_gb:.2f} GB", flush=True)
+
+# ── Post-download verification (retry once if anything missing or empty) ──────
+for attempt in range(1, 3):
+    missing_now = [f for f in REQUIRED
+                   if not Path(local_dir, f).exists()
+                   or Path(local_dir, f).stat().st_size == 0]
+    if not missing_now:
+        print("[STEP 3/4] All required files verified present.", flush=True)
+        break
+    if attempt == 1:
+        print(f"[STEP 3/4] {len(missing_now)} file(s) missing/empty after download — retrying:", flush=True)
+        for f in missing_now[:10]:
+            print(f"  missing: {f}", flush=True)
+        snapshot_download(HF_REPO, local_dir=local_dir, token=token, allow_patterns=missing_now)
+    else:
+        for f in missing_now:
+            print(f"[BOOT] FAILED: missing {f}", flush=True)
+        sys.exit(1)
 PYEOF
 echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
 
