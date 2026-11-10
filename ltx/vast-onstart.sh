@@ -1,55 +1,91 @@
 #!/usr/bin/env bash
 # Vast.ai onstart script for the LTX-2.5 video generation service.
 # The Vast bootstrap clones this repo to /workspace/gpu before calling this script.
-set -euo pipefail
+#
+# If boot fails for any reason, prints [BOOT] FAILED and idles the container
+# (sleep infinity) so the orchestrator can read the logs, detect the failure,
+# and pause the run cleanly — no restart loop.
 
-REPO_DIR="/workspace/gpu"
-MODEL_DIR="${LTX_MODEL_DIR:-/workspace/ltx/models/ltx-2.5}"
-HF_HOME="${HF_HOME:-/workspace/ltx/cache/huggingface}"
-OUTPUT_DIR="${LTX_OUTPUT_DIR:-/workspace/ltx/outputs}"
-LOG_DIR="/workspace/ltx/logs"
-PORT="${PORT:-8080}"
-REQS_HASH_FILE="/workspace/.ltx-reqs-hash"
+_boot() {
+  set -euo pipefail
 
-export HF_HOME
-# XET fast-download: HIGH_PERFORMANCE enables multi-connection XET protocol;
-# DISABLE_XET=0 keeps it enabled (double-negative is the official HF flag name).
-export HF_XET_HIGH_PERFORMANCE=1
-export HF_HUB_DISABLE_XET=0
+  REPO_DIR="/workspace/gpu"
+  MODEL_DIR="${LTX_MODEL_DIR:-/workspace/ltx/models/ltx-2.5}"
+  HF_HOME="${HF_HOME:-/workspace/ltx/cache/huggingface}"
+  OUTPUT_DIR="${LTX_OUTPUT_DIR:-/workspace/ltx/outputs}"
+  LOG_DIR="/workspace/ltx/logs"
+  PORT="${PORT:-8080}"
+  REQS_HASH_FILE="/workspace/.ltx-reqs-hash"
 
-# ── HF_TOKEN diagnostic ───────────────────────────────────────────────────────
-if [ -n "${HF_TOKEN:-}" ]; then
-  echo "[BOOT] HF_TOKEN present: yes (length ${#HF_TOKEN})"
-  export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
-else
-  echo "[BOOT] HF_TOKEN present: no — LTX-2.5 is gated; model downloads will fail"
-  exit 1
-fi
+  export HF_HOME
+  # XET fast-download: HIGH_PERFORMANCE enables multi-connection XET protocol;
+  # DISABLE_XET=0 keeps it enabled (double-negative is the official HF flag name).
+  export HF_XET_HIGH_PERFORMANCE=1
+  export HF_HUB_DISABLE_XET=0
 
-mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
+  # ── HF_TOKEN diagnostic ─────────────────────────────────────────────────────
+  if [ -n "${HF_TOKEN:-}" ]; then
+    echo "[BOOT] HF_TOKEN present: yes (length ${#HF_TOKEN})"
+    export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+  else
+    echo "[BOOT] FAILED: HF_TOKEN not set — LTX-2.5 is gated; add HF_TOKEN to container env"
+    return 1
+  fi
 
-echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
+  mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 
-# ── Install dependencies (skip if unchanged) ──────────────────────────────────
-REQS="${REPO_DIR}/ltx/requirements.txt"
-REQS_HASH="$(sha256sum "${REQS}" | awk '{print $1}')"
-CACHED_HASH="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
-if [ "${REQS_HASH}" != "${CACHED_HASH}" ]; then
-  echo "[STEP 2/4] Installing LTX dependencies (uv)..."
-  STEP2_START=$(date +%s)
-  pip install --quiet uv
-  uv pip install --system --quiet \
-    -r "${REQS}" \
-    -c "${REPO_DIR}/ltx/constraints.txt"
-  apt-get install -y -qq tesseract-ocr 2>/dev/null || true
-  echo "${REQS_HASH}" > "${REQS_HASH_FILE}"
-  echo "[STEP 2/4] pip done in $(( $(date +%s) - STEP2_START ))s"
-else
-  echo "[STEP 2/4] Dependencies unchanged — skipping."
-fi
+  echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
 
-# ── Print hf_xet version ──────────────────────────────────────────────────────
-python3 -c "
+  # ── LTX-2 library sources (ltx-core + ltx-pipelines) ────────────────────────
+  # Lightricks/LTX-2 is a monorepo; packages live under packages/.
+  # We download the archive at a pinned commit, extract, and install from local paths.
+  # Using --no-build-isolation avoids uv_build version conflicts during pip-install.
+  LTX2_SHA="a95ab856bf29407b6b066ede0abe1846050db56c"
+  LTX2_SRC_DIR="/workspace/ltx-lib/LTX-2-${LTX2_SHA}"
+
+  if [ ! -d "${LTX2_SRC_DIR}" ]; then
+    echo "[LTX2] Downloading LTX-2 sources (${LTX2_SHA:0:8})..."
+    mkdir -p /workspace/ltx-lib
+    export _LTX2_URL="https://github.com/Lightricks/LTX-2/archive/${LTX2_SHA}.tar.gz"
+    python3 -c "
+import io, tarfile, urllib.request, os
+url = os.environ['_LTX2_URL']
+print('[LTX2] downloading...', flush=True)
+data = urllib.request.urlopen(url, timeout=120).read()
+print(f'[LTX2] {len(data)//1024} KB, extracting...', flush=True)
+tarfile.open(fileobj=io.BytesIO(data)).extractall('/workspace/ltx-lib')
+print('[LTX2] extracted', flush=True)
+"
+  else
+    echo "[LTX2] cached at ${LTX2_SRC_DIR}"
+  fi
+
+  # ── Install dependencies (skip if unchanged) ─────────────────────────────────
+  # Cache key includes both requirements hash and the LTX2 commit SHA so a SHA
+  # bump forces reinstall even when requirements.txt is unchanged.
+  REQS="${REPO_DIR}/ltx/requirements.txt"
+  CACHE_KEY="$(sha256sum "${REQS}" | awk '{print $1}')-${LTX2_SHA:0:12}"
+  CACHED_KEY="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
+  if [ "${CACHE_KEY}" != "${CACHED_KEY}" ]; then
+    echo "[STEP 2/4] Installing LTX dependencies (uv)..."
+    STEP2_START=$(date +%s)
+    pip install --quiet uv
+    # --no-build-isolation: use the installed uv as build backend directly,
+    # avoiding uv_build version-pin conflicts in isolated build envs.
+    uv pip install --system --quiet --no-build-isolation \
+      "${LTX2_SRC_DIR}/packages/ltx-core" \
+      "${LTX2_SRC_DIR}/packages/ltx-pipelines" \
+      -r "${REQS}" \
+      -c "${REPO_DIR}/ltx/constraints.txt"
+    apt-get install -y -qq tesseract-ocr 2>/dev/null || true
+    echo "${CACHE_KEY}" > "${REQS_HASH_FILE}"
+    echo "[STEP 2/4] pip done in $(( $(date +%s) - STEP2_START ))s"
+  else
+    echo "[STEP 2/4] Dependencies unchanged — skipping."
+  fi
+
+  # ── Print hf_xet version ─────────────────────────────────────────────────────
+  python3 -c "
 import importlib.metadata as m
 try:
     print('[BOOT] hf_xet ' + m.version('hf_xet'))
@@ -57,10 +93,10 @@ except Exception:
     print('[BOOT] hf_xet not installed')
 "
 
-# ── Download model weights ────────────────────────────────────────────────────
-echo "[STEP 3/4] Checking LTX-2.5 model weights..."
-STEP3_START=$(date +%s)
-python3 - <<'PYEOF'
+  # ── Download model weights ────────────────────────────────────────────────────
+  echo "[STEP 3/4] Checking LTX-2.5 model weights..."
+  STEP3_START=$(date +%s)
+  python3 - <<'PYEOF'
 import os, sys, threading, time
 from pathlib import Path
 
@@ -232,9 +268,15 @@ for attempt in range(1, 3):
             print(f"[BOOT] FAILED: missing {f}", flush=True)
         sys.exit(1)
 PYEOF
-echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
+  echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
 
-# ── Start service ─────────────────────────────────────────────────────────────
-cd "${REPO_DIR}/ltx"
-echo "[STEP 4/4] Starting LTX service on port ${PORT}..."
-exec python3 app.py
+  # ── Start service ─────────────────────────────────────────────────────────────
+  cd "${REPO_DIR}/ltx"
+  echo "[STEP 4/4] Starting LTX service on port ${PORT}..."
+  exec python3 app.py
+}
+
+if ! _boot; then
+  echo "[BOOT] FAILED: boot script exited with non-zero status — see output above. Container will idle to prevent restart loop."
+  sleep infinity
+fi

@@ -1,12 +1,8 @@
 # LTX-2.5 video generation service dependencies
 # Pin patch versions for reproducible builds; bump intentionally.
 #
-# ltx_pipelines and ltx_core come from the Lightricks LTX-Video repo.
-# Install via archive URL (commit pinned below) — no git binary needed in container.
-
-# LTX-Video library (Lightricks) — archive URL avoids needing git in the container.
-# Bump the commit SHA here (and in the URL) to update.
-https://github.com/Lightricks/LTX-Video/archive/a95ab856.tar.gz
+# ltx_core and ltx_pipelines are installed from the Lightricks/LTX-2 monorepo
+# (commit pinned in vast-onstart.sh) — not listed here.
 
 # Web service
 fastapi==0.115.0

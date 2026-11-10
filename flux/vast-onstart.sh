@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Vast.ai onstart script for the FLUX reference-image service.
 # The Vast bootstrap clones this repo to /workspace/gpu before calling this script.
-set -euo pipefail
+#
+# If boot fails for any reason, prints [BOOT] FAILED and idles the container
+# (sleep infinity) so the orchestrator can read the logs and pause the run cleanly.
+
+_boot() {
+  set -euo pipefail
 
 REPO_DIR="/workspace/gpu"
 HF_HOME="${HF_HOME:-/workspace/flux/cache/huggingface}"
@@ -20,8 +25,8 @@ if [ -n "${HF_TOKEN:-}" ]; then
   echo "[BOOT] HF_TOKEN present: yes (length ${#HF_TOKEN})"
   export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
 else
-  echo "[BOOT] HF_TOKEN present: no"
-  exit 1
+  echo "[BOOT] FAILED: HF_TOKEN not set — add HF_TOKEN to container env"
+  return 1
 fi
 
 echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
@@ -297,6 +302,12 @@ PYEOF
 echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
 
 # ── Start service ─────────────────────────────────────────────────────────────
-cd "${REPO_DIR}/flux"
-echo "[STEP 4/4] Starting FLUX service on port ${PORT}..."
-exec python3 app.py
+  cd "${REPO_DIR}/flux"
+  echo "[STEP 4/4] Starting FLUX service on port ${PORT}..."
+  exec python3 app.py
+}
+
+if ! _boot; then
+  echo "[BOOT] FAILED: boot script exited with non-zero status — see output above. Container will idle to prevent restart loop."
+  sleep infinity
+fi
