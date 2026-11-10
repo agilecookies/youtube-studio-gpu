@@ -29,7 +29,7 @@ from typing import Optional
 
 import requests
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 import model as ltx_model
