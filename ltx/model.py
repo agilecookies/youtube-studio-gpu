@@ -260,17 +260,23 @@ def load_pipeline() -> None:
 
 def warmup_inference() -> None:
     """
-    Generate one tiny (256×256, 1s) clip to verify the pipeline works end-to-end.
+    Generate two tiny clips to warm up both the video and audio VAE paths.
     Called once after load_pipeline() during service startup.
     /health only reports model_loaded=true after this succeeds.
     Raises on any failure so the service exits non-zero and the orchestrator
     detects the error at boot rather than on the first real /generate request.
+
+    Two passes are required because audio=False and audio=True use different
+    model components (audio VAE). Without the audio pass, the first real shot
+    with audio=True hits uninitialized tensors on the meta device and fails.
     """
     if _pipeline is None:
         raise RuntimeError("Pipeline not loaded — call load_pipeline() first")
-    logger.info("[warmup] Running warm-up inference: 256×256, 1s, seed=0 ...")
+
+    # Pass 1: video-only — warms the video VAE and transformer
+    logger.info("[warmup] Pass 1/2: video-only 256×256 1s ...")
     t0 = time.time()
-    result = generate(
+    generate(
         prompt="A solid blue square.",
         duration_seconds=1,
         aspect_ratio="1:1",
@@ -278,10 +284,27 @@ def warmup_inference() -> None:
         audio=False,
         width=256,
         height=256,
-        job_id="warmup",
+        job_id="warmup-video",
     )
-    elapsed = time.time() - t0
-    logger.info("[warmup] Warm-up succeeded in %.1fs → %s", elapsed, result.get("output_filename", "?"))
+    logger.info("[warmup] Pass 1/2 done in %.1fs", time.time() - t0)
+
+    # Pass 2: audio+video — warms the audio VAE so the first real shot doesn't
+    # hit "Tensor on device meta is not on the expected device cuda:0"
+    logger.info("[warmup] Pass 2/2: audio+video 256×256 1s ...")
+    t1 = time.time()
+    result = generate(
+        prompt="A solid blue square.\n\nSPOKEN AUDIO:\nAMBIENT SOUND: silence",
+        duration_seconds=1,
+        aspect_ratio="1:1",
+        seed=0,
+        audio=True,
+        width=256,
+        height=256,
+        job_id="warmup-audio",
+    )
+    elapsed = time.time() - t1
+    logger.info("[warmup] Pass 2/2 done in %.1fs → %s", elapsed, result.get("output_filename", "?"))
+    logger.info("[warmup] Full warm-up complete in %.1fs", time.time() - t0)
 
 
 def _strip_visual_output_rule(prompt: str) -> str:
