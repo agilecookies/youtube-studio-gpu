@@ -252,30 +252,35 @@ def load_pipeline() -> None:
         offload_mode           = OffloadMode.CPU,
     )
 
-    # Some parameters (e.g. to_gate_logits.bias in EmbeddingsConnector) are
-    # created on the meta device during model construction and are absent from the
-    # checkpoint. They must be materialized before inference or the first real
-    # generation will raise "Tensor on device meta is not on the expected device cuda:0".
-    # Zero-init is correct: a zero bias on a gate linear gives sigmoid(0)=0.5 which is
-    # the standard default gate initialisation before training.
+    # to_gate_logits.bias (EmbeddingsConnector) is absent from the checkpoint and
+    # gets created on the meta device lazily — not at pipeline construction time, but
+    # the first time torch.compiler.nested_compile_region traces a new resolution shape.
+    # A load-time scan misses it because it doesn't exist yet.
+    # Solution: register a forward pre-hook on every nn.Module sub-component so that
+    # any meta-device parameter is materialised to CUDA right before the forward pass,
+    # regardless of when it was created.
     import torch as _torch
     import torch.nn as _nn
-    _meta_count = 0
+
+    def _materialize_meta_params(mod: _nn.Module, args: object) -> None:
+        for _pname in list(mod._parameters):
+            _p = mod._parameters[_pname]
+            if _p is not None and _p.device.type == "meta":
+                _target = _torch.device("cuda:0") if _torch.cuda.is_available() else _torch.device("cpu")
+                mod._parameters[_pname] = _nn.Parameter(
+                    _torch.zeros(_p.shape, dtype=_p.dtype, device=_target),
+                    requires_grad=False,
+                )
+                logger.warning("materialized meta param at runtime: %s.%s → %s",
+                               mod.__class__.__name__, _pname, _target)
+
+    _hook_count = 0
     for _attr_name, _component in vars(_pipeline).items():
-        if not isinstance(_component, _nn.Module):
-            continue
-        for _mod_name, _mod in _component.named_modules():
-            for _pname, _param in list(_mod.named_parameters(recurse=False)):
-                if _param.device.type == "meta":
-                    _new = _nn.Parameter(
-                        _torch.zeros(_param.shape, dtype=_param.dtype, device="cpu"),
-                        requires_grad=False,
-                    )
-                    setattr(_mod, _pname, _new)
-                    _meta_count += 1
-                    logger.info("materialized meta param: %s.%s.%s shape=%s", _attr_name, _mod_name, _pname, list(_param.shape))
-    if _meta_count:
-        logger.warning("Materialized %d meta-device parameter(s) missing from checkpoint.", _meta_count)
+        if isinstance(_component, _nn.Module):
+            for _mod in _component.modules():
+                _mod.register_forward_pre_hook(_materialize_meta_params)
+                _hook_count += 1
+    logger.info("Registered meta-param guard hook on %d modules", _hook_count)
 
     _load_seconds = time.time() - t0
     _model_loaded_at = time.time()
