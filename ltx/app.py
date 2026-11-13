@@ -58,6 +58,11 @@ SERVICE_START = time.time()
 # Watchdog ceiling in seconds.  0 (or unset) = DISABLED.  Never defaults to a
 # non-zero value so the service does not self-terminate unexpectedly.
 MAX_RUNTIME   = int(os.environ.get("LTX_MAX_RUNTIME_SECONDS", "0"))
+# Idle-shutdown timeout in seconds.  0 (or unset) = DISABLED.
+# Counts from when the model finishes its warmup, not from service start.
+# Resets after every generation.  Belt-and-suspenders in case the TS orchestrator
+# loses track of the instance (the TS side already has a 5-min idle timer).
+LTX_IDLE_TIMEOUT_SECONDS = int(os.environ.get("LTX_IDLE_TIMEOUT_SECONDS", "0"))
 # Set SKIP_MODEL_LOAD=1 to skip model loading at startup (import-check / dry-run mode).
 SKIP_MODEL_LOAD = os.environ.get("SKIP_MODEL_LOAD", "0") == "1"
 OUTPUT_DIR    = Path(os.environ.get("LTX_OUTPUT_DIR",    "/workspace/ltx/outputs"))
@@ -73,6 +78,8 @@ _MAX_ASSET_BYTES = 10 * 1024 * 1024  # 10 MB
 _current_job: Optional[dict] = None
 _last_gen_seconds: Optional[float] = None
 _model_load_error: Optional[str] = None
+# 0 = model not yet warmed up; idle countdown starts after first warmup/generation.
+_last_activity_at: float = 0.0
 
 
 def _pod_started_at_iso() -> Optional[str]:
@@ -108,21 +115,37 @@ def _gpu_info() -> Optional[GpuInfo]:
 
 async def _watchdog() -> None:
     """
-    Optional billing kill-switch.  Only runs when LTX_MAX_RUNTIME_SECONDS > 0.
-    Uses RUNPOD_POD_ID (auto-injected by RunPod) and RUNPOD_API_KEY (pod env var).
+    Optional billing kill-switch.  Runs when either LTX_MAX_RUNTIME_SECONDS > 0
+    or LTX_IDLE_TIMEOUT_SECONDS > 0.
+    _attempt_self_terminate tries the RunPod GraphQL API (no-op on Vast.ai since
+    RUNPOD_POD_ID is not set); sys.exit() always fires so the process dies and the
+    TS orchestrator detects the instance as unhealthy.
     """
     while True:
         await asyncio.sleep(60)
         elapsed = time.time() - SERVICE_START
-        if elapsed > MAX_RUNTIME:
+
+        if MAX_RUNTIME > 0 and elapsed > MAX_RUNTIME:
             logger.critical(
-                "WATCHDOG: pod runtime %.0fs exceeds ceiling %ds — terminating pod.",
+                "WATCHDOG: pod runtime %.0fs exceeds ceiling %ds — terminating.",
                 elapsed, MAX_RUNTIME,
             )
             _write_watchdog_log(elapsed)
             _attempt_self_terminate()
             import sys
             sys.exit(99)
+
+        if LTX_IDLE_TIMEOUT_SECONDS > 0 and _last_activity_at > 0:
+            idle = time.time() - _last_activity_at
+            if idle > LTX_IDLE_TIMEOUT_SECONDS:
+                logger.critical(
+                    "WATCHDOG: idle %.0fs exceeds ceiling %ds — terminating.",
+                    idle, LTX_IDLE_TIMEOUT_SECONDS,
+                )
+                _write_watchdog_log(elapsed)
+                _attempt_self_terminate()
+                import sys
+                sys.exit(98)
 
 
 def _write_watchdog_log(elapsed: float) -> None:
@@ -170,7 +193,7 @@ async def _preload_model() -> None:
     ready. Exits non-zero if loading fails so the orchestrator detects the failure
     immediately rather than waiting for the health-poll timeout.
     """
-    global _model_load_error
+    global _model_load_error, _last_activity_at
     logger.info("[startup] Pre-loading LTX-2.5 pipeline in background...")
     try:
         import torch
@@ -183,6 +206,7 @@ async def _preload_model() -> None:
         await loop.run_in_executor(None, ltx_model.load_pipeline)
         logger.info("[startup] LTX-2.5 pipeline loaded — running warm-up inference...")
         await loop.run_in_executor(None, ltx_model.warmup_inference)
+        _last_activity_at = time.time()  # idle countdown starts after warmup succeeds
         logger.info("[startup] LTX-2.5 warm-up succeeded — service is ready")
     except Exception as exc:
         import traceback as _tb
@@ -222,11 +246,14 @@ async def _startup() -> None:
     files_ok = ltx_model.model_files_present()
     logger.info("Model files:    %s", "PRESENT" if files_ok else "MISSING — will fail on first /generate")
 
-    if MAX_RUNTIME > 0:
+    if MAX_RUNTIME > 0 or LTX_IDLE_TIMEOUT_SECONDS > 0:
         asyncio.create_task(_watchdog())
-        logger.info("Watchdog:       ARMED — ceiling=%ds (%.1fmin)", MAX_RUNTIME, MAX_RUNTIME / 60)
+        if MAX_RUNTIME > 0:
+            logger.info("Watchdog:       ARMED — max_runtime=%ds (%.1fh)", MAX_RUNTIME, MAX_RUNTIME / 3600)
+        if LTX_IDLE_TIMEOUT_SECONDS > 0:
+            logger.info("Watchdog:       ARMED — idle_timeout=%ds (%.1fmin)", LTX_IDLE_TIMEOUT_SECONDS, LTX_IDLE_TIMEOUT_SECONDS / 60)
     else:
-        logger.info("Watchdog:       DISABLED (LTX_MAX_RUNTIME_SECONDS=0 or unset)")
+        logger.info("Watchdog:       DISABLED (LTX_MAX_RUNTIME_SECONDS=0, LTX_IDLE_TIMEOUT_SECONDS=0)")
 
     if SKIP_MODEL_LOAD:
         logger.info("SKIP_MODEL_LOAD=1 — skipping model load (import-check / dry-run mode)")
@@ -294,7 +321,7 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
     }
 
     async def _run() -> None:
-        global _current_job, _last_gen_seconds
+        global _current_job, _last_gen_seconds, _last_activity_at
         try:
             import torch
             if not torch.cuda.is_available():
@@ -332,6 +359,8 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "error":       str(exc),
             })
+        finally:
+            _last_activity_at = time.time()  # reset idle watchdog after every generation
 
     asyncio.create_task(_run())
     return GenerateResponse(job_id=job_id, status="running", message="Generation started")
