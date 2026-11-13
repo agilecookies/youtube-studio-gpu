@@ -267,14 +267,14 @@ async def _startup() -> None:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """
-    Responds immediately without loading the model.
-    Used by RunPod health checks and by npm run ltx:health.
-    """
     gpu_info = _gpu_info()
     loaded = ltx_model.is_loaded()
+    # Only "ready" after warmup completes — _last_activity_at is set by _preload_model
+    # after warmup_inference() succeeds.  Returning "ready" while warmup is still running
+    # causes the orchestrator to submit real shots concurrently with the warmup thread.
+    ready = loaded and _last_activity_at > 0
     return HealthResponse(
-        status="ready" if loaded else ("error" if _model_load_error else "loading"),
+        status="ready" if ready else ("error" if _model_load_error else "loading"),
         provider="ltx-2.5",
         gpu_available=gpu_info is not None,
         model_files_present=ltx_model.model_files_present(),

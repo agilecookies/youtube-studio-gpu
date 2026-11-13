@@ -315,6 +315,7 @@ def warmup_inference() -> None:
         width=256,
         height=256,
         job_id="warmup-video",
+        skip_ocr=True,
     )
     logger.info("[warmup] Pass 1/2 done in %.1fs", time.time() - t0)
 
@@ -331,6 +332,7 @@ def warmup_inference() -> None:
         width=256,
         height=256,
         job_id="warmup-audio",
+        skip_ocr=True,
     )
     elapsed = time.time() - t1
     logger.info("[warmup] Pass 2/2 done in %.1fs → %s", elapsed, result.get("output_filename", "?"))
@@ -357,6 +359,7 @@ def generate(
     conditioning_image_path: Optional[str] = None,
     negative_prompt: Optional[str] = None,
     auto_duration: bool = False,
+    skip_ocr: bool = False,
 ) -> dict:
     """
     Run LTX-2.5 joint audio+video inference.
@@ -485,9 +488,7 @@ def generate(
     })
     logger.info("Generation done in %.1f seconds → %s", elapsed, output_path)
 
-    # §10 validation gate — OCR check: sample 3 frames, reject if text detected.
-    # Fail-open when pytesseract or ffmpeg is unavailable.
-    ocr_result = _ocr_gate(output_path, num_frames)
+    ocr_result = {"passed": True, "detail": "skipped"} if skip_ocr else _ocr_gate(output_path, num_frames)
 
     return {
         "output_path":        output_path,
