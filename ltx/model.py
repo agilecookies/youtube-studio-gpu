@@ -252,6 +252,28 @@ def load_pipeline() -> None:
         offload_mode           = OffloadMode.CPU,
     )
 
+    # Some parameters (e.g. to_gate_logits.bias in EmbeddingsConnector) are
+    # created on the meta device during model construction and are absent from the
+    # checkpoint. They must be materialized before inference or the first real
+    # generation will raise "Tensor on device meta is not on the expected device cuda:0".
+    # Zero-init is correct: a zero bias on a gate linear gives sigmoid(0)=0.5 which is
+    # the standard default gate initialisation before training.
+    import torch as _torch
+    import torch.nn as _nn
+    _meta_count = 0
+    for _mod_name, _mod in _pipeline.named_modules():
+        for _pname, _param in list(_mod.named_parameters(recurse=False)):
+            if _param.device.type == "meta":
+                _new = _nn.Parameter(
+                    _torch.zeros(_param.shape, dtype=_param.dtype, device="cpu"),
+                    requires_grad=False,
+                )
+                setattr(_mod, _pname, _new)
+                _meta_count += 1
+                logger.info("materialized meta param: %s.%s shape=%s", _mod_name, _pname, list(_param.shape))
+    if _meta_count:
+        logger.warning("Materialized %d meta-device parameter(s) missing from checkpoint.", _meta_count)
+
     _load_seconds = time.time() - t0
     _model_loaded_at = time.time()
     _write_timing({"event": "model_load_finished", "load_seconds": _load_seconds})
