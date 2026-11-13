@@ -261,16 +261,19 @@ def load_pipeline() -> None:
     import torch as _torch
     import torch.nn as _nn
     _meta_count = 0
-    for _mod_name, _mod in _pipeline.named_modules():
-        for _pname, _param in list(_mod.named_parameters(recurse=False)):
-            if _param.device.type == "meta":
-                _new = _nn.Parameter(
-                    _torch.zeros(_param.shape, dtype=_param.dtype, device="cpu"),
-                    requires_grad=False,
-                )
-                setattr(_mod, _pname, _new)
-                _meta_count += 1
-                logger.info("materialized meta param: %s.%s shape=%s", _mod_name, _pname, list(_param.shape))
+    for _attr_name, _component in vars(_pipeline).items():
+        if not isinstance(_component, _nn.Module):
+            continue
+        for _mod_name, _mod in _component.named_modules():
+            for _pname, _param in list(_mod.named_parameters(recurse=False)):
+                if _param.device.type == "meta":
+                    _new = _nn.Parameter(
+                        _torch.zeros(_param.shape, dtype=_param.dtype, device="cpu"),
+                        requires_grad=False,
+                    )
+                    setattr(_mod, _pname, _new)
+                    _meta_count += 1
+                    logger.info("materialized meta param: %s.%s.%s shape=%s", _attr_name, _mod_name, _pname, list(_param.shape))
     if _meta_count:
         logger.warning("Materialized %d meta-device parameter(s) missing from checkpoint.", _meta_count)
 
