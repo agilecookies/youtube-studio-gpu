@@ -34,6 +34,17 @@ _boot() {
 
   mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 
+  # Self-update: pull latest code from main so fixes are picked up on container
+  # restart without re-provisioning.  Guard with env var to avoid infinite re-exec.
+  if [ "${_LTX_SELF_UPDATED:-0}" = "0" ]; then
+    git -C "${REPO_DIR}" fetch --depth=1 origin main 2>/dev/null \
+      && git -C "${REPO_DIR}" reset --hard origin/main 2>/dev/null \
+      && echo "[BOOT] git updated to $(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null)" \
+      || echo "[BOOT] git pull skipped (no network or not a git repo)"
+    export _LTX_SELF_UPDATED=1
+    exec bash "${REPO_DIR}/ltx/vast-onstart.sh"
+  fi
+
   # Ensure gcc/g++ for Triton JIT — runs unconditionally (outside cache-key block).
   # On conda-based images apt-get needs update first; show output so failures are visible.
   apt-get update -qq 2>/dev/null || true
