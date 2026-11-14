@@ -34,6 +34,12 @@ _boot() {
 
   mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 
+  # build-essential (gcc/g++) must be present on every boot — Triton needs a C
+  # compiler to JIT-compile DiffVAE neighborhood-attention kernels at warmup.
+  # This runs unconditionally (not inside the pip cache-key block) so it survives
+  # container restarts where apt state is lost but the requirements hash is cached.
+  apt-get install -y -qq build-essential 2>/dev/null || true
+
   echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
 
   # ── LTX-2 library sources (ltx-core + ltx-pipelines) ────────────────────────
