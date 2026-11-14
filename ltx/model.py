@@ -271,16 +271,15 @@ def load_pipeline() -> None:
                     _torch.zeros(_p.shape, dtype=_p.dtype, device=_target),
                     requires_grad=False,
                 )
-                logger.warning("materialized meta param at runtime: %s.%s → %s",
+                logger.warning("materialized meta param: %s.%s → %s",
                                mod.__class__.__name__, _pname, _target)
 
-    _hook_count = 0
-    for _attr_name, _component in vars(_pipeline).items():
-        if isinstance(_component, _nn.Module):
-            for _mod in _component.modules():
-                _mod.register_forward_pre_hook(_materialize_meta_params)
-                _hook_count += 1
-    logger.info("Registered meta-param guard hook on %d modules", _hook_count)
+    # DistilledPipeline does not store sub-components as plain instance attributes
+    # (vars() returns zero nn.Module objects), so per-module registration misses them.
+    # Register a process-wide pre-hook instead — PyTorch calls it before every
+    # nn.Module.forward() regardless of how the pipeline stores its components.
+    _nn.modules.module.register_module_forward_pre_hook(_materialize_meta_params)
+    logger.info("Registered global meta-param guard hook")
 
     _load_seconds = time.time() - t0
     _model_loaded_at = time.time()
