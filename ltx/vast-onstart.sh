@@ -34,11 +34,21 @@ _boot() {
 
   mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}"
 
-  # build-essential (gcc/g++) must be present on every boot — Triton needs a C
-  # compiler to JIT-compile DiffVAE neighborhood-attention kernels at warmup.
-  # This runs unconditionally (not inside the pip cache-key block) so it survives
-  # container restarts where apt state is lost but the requirements hash is cached.
-  apt-get install -y -qq build-essential 2>/dev/null || true
+  # Ensure gcc/g++ for Triton JIT — runs unconditionally (outside cache-key block).
+  # On conda-based images apt-get needs update first; show output so failures are visible.
+  apt-get update -qq 2>/dev/null || true
+  apt-get install -y -q gcc g++ 2>/dev/null \
+    && echo "[BOOT] gcc: $(gcc --version 2>/dev/null | head -1)" \
+    || echo "[BOOT] WARNING: apt-get gcc failed — trying conda"
+  if ! command -v gcc >/dev/null 2>&1; then
+    /opt/conda/bin/conda install -y -q -c conda-forge gcc gxx_linux-64 2>/dev/null \
+      && echo "[BOOT] gcc via conda: $(gcc --version 2>/dev/null | head -1)" \
+      || echo "[BOOT] WARNING: conda gcc also failed"
+  fi
+  # Export CC/CXX so Triton picks them up regardless of PATH detection
+  export CC="${CC:-$(command -v gcc 2>/dev/null || echo '')}"
+  export CXX="${CXX:-$(command -v g++ 2>/dev/null || echo '')}"
+  echo "[BOOT] CC=${CC:-NOT FOUND}  CXX=${CXX:-NOT FOUND}"
 
   echo "[STEP 1/4] Repo cloned to ${REPO_DIR} — starting bootstrap"
 
@@ -275,6 +285,23 @@ for attempt in range(1, 3):
         sys.exit(1)
 PYEOF
   echo "[STEP 3/4] done in $(( $(date +%s) - STEP3_START ))s"
+
+  # ── Attempt natten install (once per instance lifetime) ──────────────────────
+  # natten provides native CUDA neighbourhood-attention for the DiffVAE video
+  # decoder, eliminating the Triton JIT C-compiler dependency entirely.
+  # Flag file prevents retrying on every container restart (build can be slow).
+  if [ ! -f /workspace/.natten-install-done ]; then
+    echo "[BOOT] attempting natten install..."
+    if uv pip install --system --quiet natten 2>/dev/null; then
+      echo "[BOOT] natten: installed OK (PyPI wheel)"
+    elif uv pip install --system --quiet --no-build-isolation \
+        "${LTX2_SRC_DIR}/packages/ltx-core[natten]" 2>/dev/null; then
+      echo "[BOOT] natten: installed OK (ltx-core extra)"
+    else
+      echo "[BOOT] natten: no prebuilt wheel — DiffVAE will use Triton or pure-PyTorch"
+    fi
+    touch /workspace/.natten-install-done
+  fi
 
   # ── Start service ─────────────────────────────────────────────────────────────
   cd "${REPO_DIR}/ltx"
