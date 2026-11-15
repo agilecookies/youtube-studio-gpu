@@ -48,7 +48,7 @@ _boot() {
   # Ensure gcc/g++ for Triton JIT — runs unconditionally (outside cache-key block).
   # On conda-based images apt-get needs update first; show output so failures are visible.
   apt-get update -qq 2>/dev/null || true
-  apt-get install -y -q gcc g++ 2>/dev/null \
+  apt-get install -y -q gcc g++ ffmpeg 2>/dev/null \
     && echo "[BOOT] gcc: $(gcc --version 2>/dev/null | head -1)" \
     || echo "[BOOT] WARNING: apt-get gcc failed — trying conda"
   if ! command -v gcc >/dev/null 2>&1; then
