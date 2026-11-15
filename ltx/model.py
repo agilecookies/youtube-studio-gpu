@@ -241,15 +241,35 @@ def load_pipeline() -> None:
         ) from exc
 
     model_paths = _make_model_paths()
-    # CPU offload: transformer and prompt-encoder weights stay in CPU RAM,
-    # streamed layer-by-layer to a small GPU buffer. Keeps VRAM use under ~5 GB
-    # during weight streaming, making the 22B BF16 model fit on A100 80GB.
-    logger.info("Pipeline offload_mode=cpu (transformer + prompt encoder streamed from CPU RAM)")
+
+    # Auto-select offload mode from available VRAM:
+    # A100 80GB (≥70 GB): load full 44 GB BF16 model into VRAM → ~1-2 min/shot.
+    # Smaller GPUs: stream weights from CPU RAM → keeps VRAM <5 GB but ~5 min/shot.
+    import torch as _torch_check
+    vram_bytes = (
+        _torch_check.cuda.get_device_properties(0).total_memory
+        if _torch_check.cuda.is_available()
+        else 0
+    )
+    _FULL_VRAM_THRESHOLD = 70 * 1024 ** 3  # 70 GB — only A100 80GB qualifies
+    if vram_bytes >= _FULL_VRAM_THRESHOLD:
+        selected_offload = OffloadMode.NONE
+        logger.info(
+            "Pipeline offload_mode=none (%.0f GB VRAM ≥ 70 GB — full model in VRAM, fastest)",
+            vram_bytes / 1024 ** 3,
+        )
+    else:
+        selected_offload = OffloadMode.CPU
+        logger.info(
+            "Pipeline offload_mode=cpu (%.0f GB VRAM < 70 GB — streaming from CPU RAM)",
+            vram_bytes / 1024 ** 3,
+        )
+
     _pipeline = DistilledPipeline(
         model_paths            = model_paths,
         spatial_upsampler_path = str(MODEL_DIR / "latent_upscale_models" / "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
         loras                  = [],
-        offload_mode           = OffloadMode.CPU,
+        offload_mode           = selected_offload,
     )
 
     # to_gate_logits.bias (EmbeddingsConnector) is absent from the checkpoint and
@@ -284,7 +304,7 @@ def load_pipeline() -> None:
     _load_seconds = time.time() - t0
     _model_loaded_at = time.time()
     _write_timing({"event": "model_load_finished", "load_seconds": _load_seconds})
-    logger.info("Pipeline loaded in %.1f seconds (offload_mode=cpu)", _load_seconds)
+    logger.info("Pipeline loaded in %.1f seconds (offload_mode=%s)", _load_seconds, selected_offload.value)
 
 
 def warmup_inference() -> None:

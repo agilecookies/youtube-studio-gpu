@@ -190,33 +190,30 @@ class TestRoutes:
         assert resp.status_code == 404
 
 
-# ── CPU offload tests ─────────────────────────────────────────────────────────
+# ── Offload mode tests ────────────────────────────────────────────────────────
 
-class TestCpuOffload:
-    """Verify that load_pipeline() constructs DistilledPipeline with OffloadMode.CPU."""
+class TestOffloadMode:
+    """Verify load_pipeline() selects OffloadMode.NONE on ≥70 GB VRAM, CPU otherwise."""
 
-    def test_pipeline_constructed_with_cpu_offload(self) -> None:
-        """DistilledPipeline must be called with offload_mode whose .value == 'cpu'."""
-        from enum import Enum
+    def _load_with_vram(self, vram_bytes: int, fake_offload_mode):
+        """Call load_pipeline() with a fake VRAM size; return the offload_mode kwarg."""
         from unittest.mock import MagicMock, patch
-
-        class FakeOffloadMode(Enum):
-            NONE = "none"
-            CPU  = "cpu"
-            DISK = "disk"
 
         fake_distilled_cls   = MagicMock(return_value=MagicMock())
         fake_model_paths_cls = MagicMock()
         fake_model_paths_cls.from_split.return_value = MagicMock()
 
-        # Patch sys.modules so the imports inside load_pipeline() resolve to our fakes.
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = vram_bytes > 0
+        fake_torch.cuda.get_device_properties.return_value = MagicMock(total_memory=vram_bytes)
+
         patched_modules = {
             "ltx_pipelines.distilled":         MagicMock(DistilledPipeline=fake_distilled_cls),
             "ltx_pipelines.utils.model_paths": MagicMock(ModelPaths=fake_model_paths_cls),
-            "ltx_pipelines.utils.types":        MagicMock(OffloadMode=FakeOffloadMode),
+            "ltx_pipelines.utils.types":        MagicMock(OffloadMode=fake_offload_mode),
+            "torch":                            fake_torch,
         }
 
-        # Reset pipeline state before and after.
         original_pipeline = ltx_model._pipeline
         ltx_model._pipeline = None
         try:
@@ -230,11 +227,40 @@ class TestCpuOffload:
         assert fake_distilled_cls.called, "DistilledPipeline was never instantiated"
         _, kwargs = fake_distilled_cls.call_args
         assert "offload_mode" in kwargs, (
-            f"offload_mode not passed to DistilledPipeline. Got kwargs: {list(kwargs)}"
+            f"offload_mode not passed to DistilledPipeline. kwargs: {list(kwargs)}"
         )
-        offload_val = kwargs["offload_mode"]
-        assert offload_val == FakeOffloadMode.CPU, (
-            f"Expected OffloadMode.CPU (value='cpu'), got {offload_val!r}"
+        return kwargs["offload_mode"]
+
+    def _fake_mode(self):
+        from enum import Enum
+        class FakeOffloadMode(Enum):
+            NONE = "none"
+            CPU  = "cpu"
+            DISK = "disk"
+        return FakeOffloadMode
+
+    def test_a100_80gb_uses_offload_none(self) -> None:
+        """A100 80GB (≥70 GB VRAM) must select OffloadMode.NONE for fastest generation."""
+        FakeOffloadMode = self._fake_mode()
+        result = self._load_with_vram(80 * 1024 ** 3, FakeOffloadMode)
+        assert result == FakeOffloadMode.NONE, (
+            f"Expected OffloadMode.NONE on 80 GB VRAM, got {result!r}"
+        )
+
+    def test_small_gpu_uses_cpu_offload(self) -> None:
+        """<70 GB VRAM must select OffloadMode.CPU (weight streaming from CPU RAM)."""
+        FakeOffloadMode = self._fake_mode()
+        result = self._load_with_vram(48 * 1024 ** 3, FakeOffloadMode)
+        assert result == FakeOffloadMode.CPU, (
+            f"Expected OffloadMode.CPU on 48 GB VRAM, got {result!r}"
+        )
+
+    def test_no_cuda_uses_cpu_offload(self) -> None:
+        """No CUDA device must fall back to OffloadMode.CPU."""
+        FakeOffloadMode = self._fake_mode()
+        result = self._load_with_vram(0, FakeOffloadMode)
+        assert result == FakeOffloadMode.CPU, (
+            f"Expected OffloadMode.CPU when no CUDA, got {result!r}"
         )
 
 
