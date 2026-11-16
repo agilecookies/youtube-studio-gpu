@@ -47,9 +47,16 @@ _boot() {
   CACHED_KEY="$(cat "${REQS_HASH_FILE}" 2>/dev/null || echo '')"
   if [ "${CACHE_KEY}" != "${CACHED_KEY}" ]; then
     pip install --quiet uv
-    # Wan2.2 requirements first (includes flash-attn etc.)
-    uv pip install --system --quiet -r "${REQS}" || \
-      pip install --quiet -r "${REQS}"
+    # Install Wan2.2 deps — skip flash-attn from requirements (compile OOMs on <80GB RAM hosts).
+    # Install flash-attn separately with MAX_JOBS=4 to cap RAM usage, or skip if already present.
+    REQS_NO_FLASH="/tmp/wan-reqs-no-flash.txt"
+    grep -iv "flash.attn\|flash_attn" "${REQS}" > "${REQS_NO_FLASH}" || true
+    uv pip install --system --quiet -r "${REQS_NO_FLASH}" || \
+      pip install --quiet -r "${REQS_NO_FLASH}"
+    # Install flash-attn only if not already present (pytorch images ship it pre-built)
+    python3 -c "import flash_attn" 2>/dev/null || \
+      MAX_JOBS=4 pip install --quiet flash-attn --no-build-isolation || \
+      echo "[STEP 2/4] flash-attn unavailable — continuing without (inference still works)"
     # Our service requirements (fastapi, uvicorn, etc.)
     uv pip install --system --quiet -r "${OUR_REQS}"
     echo "${CACHE_KEY}" > "${REQS_HASH_FILE}"
