@@ -18,10 +18,12 @@ _boot() {
 
   # Self-update our repo
   if [ "${_WAN_SELF_UPDATED:-0}" = "0" ]; then
-    git -C "${REPO_DIR}" fetch --depth=1 origin main 2>/dev/null \
-      && git -C "${REPO_DIR}" reset --hard origin/main 2>/dev/null \
-      && echo "[BOOT] updated to $(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null)" \
-      || echo "[BOOT] git pull skipped"
+    if git -C "${REPO_DIR}" fetch --depth=1 origin main 2>/dev/null \
+        && git -C "${REPO_DIR}" reset --hard FETCH_HEAD 2>/dev/null; then
+      echo "[BOOT] updated to $(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null)"
+    else
+      echo "[BOOT] git update failed — continuing with cached version"
+    fi
     export _WAN_SELF_UPDATED=1
     exec bash "${REPO_DIR}/wan/vast-onstart.sh"
   fi
