@@ -1,12 +1,4 @@
-torch>=2.4.0
-torchvision
-torchaudio
-transformers>=4.45.0
-accelerate>=0.34.0
-diffusers>=0.32.0
-imageio[ffmpeg]
-numpy
-Pillow>=10.0.0
+# Service dependencies (Wan2.2 repo's requirements.txt covers torch/transformers/etc.)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.0.0

@@ -59,10 +59,14 @@ async def startup() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     if SKIP_MODEL_LOAD:
-        logger.info("[wan.app] SKIP_MODEL_LOAD=1 — skipping model load")
+        logger.info("[wan.app] SKIP_MODEL_LOAD=1 — skipping model check")
         return
-    logger.info("[wan.app] Loading Wan2.2-S2V model in background …")
-    asyncio.get_event_loop().run_in_executor(None, wan_model.load_model)
+    # load_model() is a fast check (no GPU loading) — verify repo + weights exist
+    try:
+        wan_model.load_model()
+        logger.info("[wan.app] Model check passed — ready")
+    except Exception as e:
+        logger.warning(f"[wan.app] Model check failed (will retry on first /generate): {e}")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
