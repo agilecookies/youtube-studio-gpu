@@ -81,7 +81,7 @@ def generate(
         "--prompt",           prompt,
         "--audio",            audio_path,
         "--save_file",        str(out_path),
-        "--seed",             str(seed),
+        "--base_seed",        str(seed),
     ]
     if image_path:
         cmd += ["--image", image_path]
