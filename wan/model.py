@@ -58,12 +58,18 @@ def generate(
     fps: int = 24,
     size: str = "1024*704",
 ) -> str:
-    """Run generate.py. Returns absolute path to the output MP4."""
+    """Run generate.py. Returns absolute path to the output MP4.
+
+    We attempt two save strategies and log each outcome so we know which works:
+      1. --save_file <explicit_path>  (flag may not exist in older generate.py versions)
+      2. samples/<timestamp>.mp4      (generate.py's default output location)
+    """
     if not _model_ready:
         raise RuntimeError("Model not ready — call load_model() first")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / f"{uuid.uuid4().hex}.mp4"
+    out_name = f"{uuid.uuid4().hex}.mp4"
+    out_path = OUTPUT_DIR / out_name
 
     cmd = [
         sys.executable, str(WAN_REPO_DIR / "generate.py"),
@@ -80,9 +86,10 @@ def generate(
     if image_path:
         cmd += ["--image", image_path]
 
-    logger.info(f"[wan.model] Running: {' '.join(cmd[:6])} ...")
-    t0 = time.time()
+    logger.info(f"[wan.model] CMD: {' '.join(cmd)}")
+    logger.info(f"[wan.model] Expected --save_file path: {out_path}")
 
+    t0 = time.time()
     result = subprocess.run(
         cmd,
         cwd=str(WAN_REPO_DIR),
@@ -90,27 +97,45 @@ def generate(
         text=True,
         timeout=3600,
     )
-
     elapsed = time.time() - t0
+
+    logger.info(f"[wan.model] generate.py exited {result.returncode} after {elapsed:.1f}s")
 
     if result.returncode != 0:
         raise RuntimeError(f"generate.py exited {result.returncode} after {elapsed:.0f}s")
 
-    # generate.py may save to --save_file directly, or fall back to its default
-    # output location (samples/<timestamp>.mp4). Check both.
+    # ── Strategy 1: --save_file path ─────────────────────────────────────────
     if out_path.exists():
-        logger.info(f"[wan.model] Done in {elapsed:.1f}s → {out_path}")
+        sz = out_path.stat().st_size
+        logger.info(f"[wan.model] STRATEGY 1 SUCCESS: --save_file worked → {out_path} ({sz} bytes)")
         return str(out_path)
+    else:
+        logger.warning(f"[wan.model] STRATEGY 1 MISS: {out_path} not found — --save_file flag may be unrecognised")
 
-    # Fallback: find the newest .mp4 in the repo's default output dir
+    # ── Strategy 2: samples/ default output dir ───────────────────────────────
     fallback_dir = WAN_REPO_DIR / "samples"
+    logger.info(f"[wan.model] STRATEGY 2: checking {fallback_dir} for newest .mp4")
     if fallback_dir.exists():
         candidates = sorted(fallback_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
         if candidates:
-            # Move to our output dir for consistent serving
-            dest = OUTPUT_DIR / out_path.name
-            candidates[0].rename(dest)
-            logger.info(f"[wan.model] Done in {elapsed:.1f}s → {dest} (from fallback)")
-            return str(dest)
+            newest = candidates[0]
+            # Only accept files modified within the last hour (this run)
+            age = time.time() - newest.stat().st_mtime
+            if age < 3600:
+                dest = OUTPUT_DIR / out_name
+                newest.rename(dest)
+                sz = dest.stat().st_size
+                logger.info(f"[wan.model] STRATEGY 2 SUCCESS: moved {newest.name} → {dest} ({sz} bytes, age={age:.0f}s)")
+                return str(dest)
+            else:
+                logger.warning(f"[wan.model] STRATEGY 2 MISS: newest .mp4 in samples/ is {age:.0f}s old — skipping stale file")
+        else:
+            logger.warning(f"[wan.model] STRATEGY 2 MISS: {fallback_dir} exists but contains no .mp4 files")
+    else:
+        logger.warning(f"[wan.model] STRATEGY 2 MISS: {fallback_dir} does not exist")
 
-    raise RuntimeError(f"generate.py completed but output not found at {out_path}")
+    raise RuntimeError(
+        f"generate.py completed (exit 0) but output not found.\n"
+        f"  strategy-1 path: {out_path}\n"
+        f"  strategy-2 dir:  {fallback_dir}"
+    )
